@@ -17,9 +17,31 @@ Browser automation for Claude via the Model Context Protocol (MCP).
    choco install geckodriver             # Windows
    ```
 
-2. **Build the server**:
+2. **Download or build the server**:
+   
+   **Option A: Download pre-built binary**
    ```bash
-   git clone <repository-url>
+   # Download for your platform from:
+   # https://github.com/EmilLindfors/rust-browser-mcp/releases/latest
+   
+   # Linux
+   wget https://github.com/EmilLindfors/rust-browser-mcp/releases/latest/download/rust-browser-mcp-x86_64-unknown-linux-gnu.tar.gz
+   tar xzf rust-browser-mcp-x86_64-unknown-linux-gnu.tar.gz
+   
+   # macOS (Intel)
+   wget https://github.com/EmilLindfors/rust-browser-mcp/releases/latest/download/rust-browser-mcp-x86_64-apple-darwin.tar.gz
+   tar xzf rust-browser-mcp-x86_64-apple-darwin.tar.gz
+   
+   # macOS (Apple Silicon)
+   wget https://github.com/EmilLindfors/rust-browser-mcp/releases/latest/download/rust-browser-mcp-aarch64-apple-darwin.tar.gz
+   tar xzf rust-browser-mcp-aarch64-apple-darwin.tar.gz
+   
+   # Windows: Download rust-browser-mcp-x86_64-pc-windows-msvc.zip and extract
+   ```
+   
+   **Option B: Build from source**
+   ```bash
+   git clone https://github.com/EmilLindfors/rust-browser-mcp.git
    cd rust-browser-mcp
    cargo build --release
    ```
