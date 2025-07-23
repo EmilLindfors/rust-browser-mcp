@@ -1,0 +1,74 @@
+[package]
+name = "rust-browser-mcp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fantoccini = "0.22.0"
+rmcp = { version = "0.3", features = ["server", "client",
+    "transport-sse-server",
+    "transport-io", 
+    "transport-child-process",
+    "transport-streamable-http-server",
+    "transport-streamable-http-client",
+    "auth"] }
+tokio = { version = "1.46.1", features = [    "macros",
+    "rt",
+    "rt-multi-thread",
+    "io-std",
+    "signal"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [
+    "env-filter",
+    "std",
+    "fmt",
+] }
+futures = "0.3"
+base64 = "0.22"
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+clap = { version = "4.0", features = ["derive"] }
+
+# HTTP server dependencies
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
+# OAuth dependencies
+oauth2 = { version = "4.4" }
+openidconnect = { version = "3.5" }
+askama = { version = "0.12" }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4"] }
+url = { version = "2.5" }
+
+[[bin]]
+name = "rust-browser-mcp"
+path = "src/main.rs"
+
+[[example]]
+name = "stdio_client"
+path = "examples/stdio_client.rs"
+
+[[example]]
+name = "http_client"
+path = "examples/http_client.rs"
+
+[[example]]
+name = "oauth_demo_server"
+path = "examples/oauth_demo_server.rs"
+
+[[example]]
+name = "oauth_client"
+path = "examples/oauth_client.rs"
+
+[[example]]
+name = "oauth_client_simple"
+path = "examples/oauth_client_simple.rs"
+
+
+
+[dev-dependencies]
+tokio-test = "0.4"
+webbrowser = "0.8"
