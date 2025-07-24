@@ -11,10 +11,16 @@ use axum::middleware;
 use std::sync::Arc;
 
 pub async fn run_http_server(server: WebDriverServer, bind_addr: &str, no_auth: bool) -> Result<()> {
+    // Convert server to HTTP mode
+    let config = server.get_client_manager().get_config().clone();
+    let mut server = rust_browser_mcp::WebDriverServer::with_config_and_mode(config, rust_browser_mcp::tools::ServerMode::Http)?;
     tracing::info!(
         "WebDriver MCP Server listening on HTTP at {} (Ctrl+C to stop)",
         bind_addr
     );
+
+    // HTTP mode: Start drivers proactively for better performance
+    server.ensure_drivers_started().await?;
 
     // Create a clone of the server for cleanup before moving it into the closure
     let server_for_cleanup = server.clone();

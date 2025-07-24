@@ -7,6 +7,7 @@ edition = "2024"
 fantoccini = "0.22.0"
 rmcp = { version = "0.3", features = ["server", "client",
     "transport-sse-server",
+    "transport-sse-client",
     "transport-io", 
     "transport-child-process",
     "transport-streamable-http-server",
@@ -67,6 +68,10 @@ path = "examples/oauth_client.rs"
 [[example]]
 name = "oauth_client_simple"
 path = "examples/oauth_client_simple.rs"
+
+[[example]]
+name = "advanced_monitoring"
+path = "examples/advanced_monitoring.rs"
 
 
 

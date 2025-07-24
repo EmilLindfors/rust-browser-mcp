@@ -3,11 +3,23 @@ use std::sync::Arc;
 use rmcp::model::{Content, Tool};
 use serde_json::json;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerMode {
+    Stdio,  // Client controls driver lifecycle
+    Http,   // Server manages driver lifecycle automatically
+}
+
 pub struct ToolDefinitions;
 
 impl ToolDefinitions {
     pub fn list_all() -> Vec<Tool> {
-        vec![
+        // Default to stdio mode for backward compatibility
+        Self::list_for_mode(ServerMode::Stdio)
+    }
+
+    pub fn list_for_mode(mode: ServerMode) -> Vec<Tool> {
+        let mut tools = vec![
+            // Core browser automation tools (available in both modes)
             Self::navigation_tool(),
             Self::find_element_tool(),
             Self::click_tool(),
@@ -35,7 +47,21 @@ impl ToolDefinitions {
             Self::monitor_memory_usage_tool(),
             Self::run_performance_test_tool(),
             Self::monitor_resource_usage_tool(),
-        ]
+        ];
+
+        // Add driver lifecycle tools only in stdio mode
+        if mode == ServerMode::Stdio {
+            tools.extend(vec![
+                Self::get_healthy_endpoints_tool(),
+                Self::refresh_driver_health_tool(),
+                Self::list_managed_drivers_tool(),
+                Self::start_driver_tool(),
+                Self::stop_driver_tool(),
+                Self::stop_all_drivers_tool(),
+            ]);
+        }
+
+        tools
     }
 
     fn navigation_tool() -> Tool {
@@ -802,6 +828,96 @@ impl ToolDefinitions {
                     }
                 }
             }).as_object().unwrap().clone()),
+            annotations: None,
+        }
+    }
+
+    fn get_healthy_endpoints_tool() -> Tool {
+        Tool {
+            name: "get_healthy_endpoints".into(),
+            description: Some("Get list of healthy WebDriver endpoints".into()),
+            input_schema: Arc::new(
+                json!({
+                    "type": "object",
+                    "properties": {}
+                }).as_object().unwrap().clone()),
+            annotations: None,
+        }
+    }
+
+    fn refresh_driver_health_tool() -> Tool {
+        Tool {
+            name: "refresh_driver_health".into(),
+            description: Some("Refresh health status of all WebDriver endpoints".into()),
+            input_schema: Arc::new(
+                json!({
+                    "type": "object",
+                    "properties": {}
+                }).as_object().unwrap().clone()),
+            annotations: None,
+        }
+    }
+
+    fn list_managed_drivers_tool() -> Tool {
+        Tool {
+            name: "list_managed_drivers".into(),
+            description: Some("List all managed WebDriver processes and their status".into()),
+            input_schema: Arc::new(
+                json!({
+                    "type": "object",
+                    "properties": {}
+                }).as_object().unwrap().clone()),
+            annotations: None,
+        }
+    }
+
+    fn start_driver_tool() -> Tool {
+        Tool {
+            name: "start_driver".into(),
+            description: Some("Start a specific WebDriver process".into()),
+            input_schema: Arc::new(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "driver_type": {
+                            "type": "string",
+                            "description": "Type of driver to start (chrome, firefox, edge)"
+                        }
+                    },
+                    "required": ["driver_type"]
+                }).as_object().unwrap().clone()),
+            annotations: None,
+        }
+    }
+
+    fn stop_driver_tool() -> Tool {
+        Tool {
+            name: "stop_driver".into(),
+            description: Some("Stop a specific WebDriver process".into()),
+            input_schema: Arc::new(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "driver_type": {
+                            "type": "string",
+                            "description": "Type of driver to stop (chrome, firefox, edge)"
+                        }
+                    },
+                    "required": ["driver_type"]
+                }).as_object().unwrap().clone()),
+            annotations: None,
+        }
+    }
+
+    fn stop_all_drivers_tool() -> Tool {
+        Tool {
+            name: "stop_all_drivers".into(),
+            description: Some("Stop all managed WebDriver processes".into()),
+            input_schema: Arc::new(
+                json!({
+                    "type": "object",
+                    "properties": {}
+                }).as_object().unwrap().clone()),
             annotations: None,
         }
     }

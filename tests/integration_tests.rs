@@ -1,7 +1,7 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
-use webdriver_mcp::{ClientManager, Config, DriverManager};
+use rust_browser_mcp::{ClientManager, Config, DriverManager, DriverType};
 
 #[test]
 fn test_headless_configuration() {
@@ -102,7 +102,7 @@ fn test_automatic_cleanup_config() {
 #[test]
 fn test_driver_detection() {
     // Test that we can detect different driver types
-    use webdriver_mcp::DriverType;
+    use rust_browser_mcp::DriverType;
 
     assert_eq!(DriverType::Firefox.executable_name(), "geckodriver");
     assert_eq!(DriverType::Firefox.default_port(), 4444);
@@ -148,7 +148,7 @@ async fn test_driver_manager_cleanup() {
     }
 
     let driver_manager = DriverManager::new();
-    let driver_type = webdriver_mcp::DriverType::Firefox;
+    let driver_type = DriverType::Firefox;
 
     // Ensure no processes are running initially
     let initial_count = count_geckodriver_processes();
@@ -252,7 +252,7 @@ async fn test_client_automatic_retry() {
 fn test_error_handling_robustness() {
     // Test that our cleanup code handles various error conditions gracefully
     let driver_manager = DriverManager::new();
-    let driver_type = webdriver_mcp::DriverType::Firefox;
+    let driver_type = DriverType::Firefox;
 
     // This should not panic even if pgrep fails or no processes exist
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -322,7 +322,7 @@ async fn test_lifecycle_management() {
     }
 
     let driver_manager = DriverManager::new();
-    let driver_type = webdriver_mcp::DriverType::Firefox;
+    let driver_type = DriverType::Firefox;
 
     // Test that no drivers are initially managed
     let initial_status = driver_manager.get_managed_processes_status();

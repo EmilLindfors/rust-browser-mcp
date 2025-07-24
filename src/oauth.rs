@@ -291,9 +291,9 @@ pub async fn oauth_callback_get(
                 );
                 headers.insert(SET_COOKIE, cookie_value.parse().unwrap());
 
-                return (headers, Html(format!(
-                    "<h1>Authorization Successful</h1><p>Authentication complete! You can now access protected resources.</p><script>window.location.href='/';</script>"
-                ))).into_response();
+                return (headers, Html(
+                    "<h1>Authorization Successful</h1><p>Authentication complete! You can now access protected resources.</p><script>window.location.href='/';</script>".to_string()
+                )).into_response();
             }
             Err(e) => {
                 tracing::error!("Failed to exchange code with Keycloak: {}", e);
@@ -324,9 +324,9 @@ pub async fn oauth_callback_get(
     );
     headers.insert(SET_COOKIE, cookie_value.parse().unwrap());
 
-    (headers, Html(format!(
-        "<h1>Authorization Successful (Demo Mode)</h1><p>Authentication complete! You can now access protected resources.</p><script>window.location.href='/';</script>"
-    ))).into_response()
+    (headers, Html(
+        "<h1>Authorization Successful (Demo Mode)</h1><p>Authentication complete! You can now access protected resources.</p><script>window.location.href='/';</script>".to_string()
+    )).into_response()
 }
 
 pub async fn oauth_callback_post(
@@ -366,9 +366,9 @@ pub async fn oauth_callback_post(
     );
     headers.insert(SET_COOKIE, cookie_value.parse().unwrap());
 
-    (headers, Html(format!(
-        "<h1>Authorization Successful (Demo Mode)</h1><p>Authentication complete! You can now access protected resources.</p><script>window.location.href='/';</script>"
-    ))).into_response()
+    (headers, Html(
+        "<h1>Authorization Successful (Demo Mode)</h1><p>Authentication complete! You can now access protected resources.</p><script>window.location.href='/';</script>".to_string()
+    )).into_response()
 }
 
 /// Token validation middleware
@@ -380,11 +380,7 @@ pub async fn validate_token_middleware(
     // Try to extract token from Authorization header first
     let token = if let Some(auth_header) = request.headers().get("Authorization") {
         let header_str = auth_header.to_str().unwrap_or("");
-        if let Some(token) = header_str.strip_prefix("Bearer ") {
-            Some(token.to_string())
-        } else {
-            None
-        }
+        header_str.strip_prefix("Bearer ").map(|token| token.to_string())
     } else {
         None
     };
@@ -432,7 +428,7 @@ fn get_base_url_from_request(request: &Request<Body>) -> String {
         .get("host")
         .and_then(|h| h.to_str().ok())
         .unwrap_or("localhost:8080");
-    format!("{}://{}", scheme, host)
+    format!("{scheme}://{host}")
 }
 
 /// OAuth 2.0 Authorization Server Metadata endpoint (RFC 8414)
@@ -444,8 +440,8 @@ pub async fn oauth_server_metadata(
     
     let metadata = AuthorizationServerMetadata {
         issuer: base_url.clone(),
-        authorization_endpoint: format!("{}/oauth/authorize", base_url),
-        token_endpoint: format!("{}/oauth/callback", base_url), // Using callback as token endpoint for demo
+        authorization_endpoint: format!("{base_url}/oauth/authorize"),
+        token_endpoint: format!("{base_url}/oauth/callback"), // Using callback as token endpoint for demo
         response_types_supported: vec!["code".to_string()],
         grant_types_supported: vec!["authorization_code".to_string()],
         code_challenge_methods_supported: vec!["S256".to_string()],
@@ -463,7 +459,7 @@ pub async fn protected_resource_metadata(
     let base_url = get_base_url_from_request(&request);
     
     let metadata = ProtectedResourceMetadata {
-        resource: format!("{}/mcp", base_url),
+        resource: format!("{base_url}/mcp"),
         authorization_servers: vec![base_url.clone()],
         scopes_supported: vec!["webdriver".to_string()],
         bearer_methods_supported: vec!["header".to_string()],

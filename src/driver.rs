@@ -101,34 +101,12 @@ impl DriverManager {
     ) -> Result<Vec<(DriverType, String)>> {
         info!("Starting concurrent WebDriver processes: {:?}", driver_names);
         
-        let mut handles = Vec::new();
-
-        // Start all requested drivers concurrently
+        // Start all requested drivers sequentially to avoid Drop issues with cloning
+        let mut results = Vec::new();
+        
         for driver_name in driver_names {
             if let Some(driver_type) = DriverType::from_string(driver_name) {
-                let driver_manager = self.clone();
-                let driver_type_clone = driver_type.clone();
-                
-                let handle = tokio::spawn(async move {
-                    let result = driver_manager.start_single_driver(driver_type_clone).await;
-                    (driver_type, result)
-                });
-                handles.push(handle);
-            } else {
-                warn!("Unknown driver type '{}', skipping", driver_name);
-            }
-        }
-
-        // Wait for all drivers to start with timeout
-        let timeout_result = tokio::time::timeout(timeout, async {
-            let mut results = Vec::new();
-            for handle in handles {
-                let (driver_type, result) = handle.await.unwrap_or_else(|e| {
-                    warn!("Driver startup task failed: {}", e);
-                    (DriverType::Chrome, Err(WebDriverError::Session("Task failed".to_string())))
-                });
-
-                match result {
+                match self.start_single_driver(driver_type.clone()).await {
                     Ok(endpoint) => {
                         info!(
                             "Successfully started {} at {}",
@@ -152,9 +130,12 @@ impl DriverManager {
                         );
                     }
                 }
+            } else {
+                warn!("Unknown driver type '{}', skipping", driver_name);
             }
-            results
-        }).await;
+        }
+
+        let timeout_result: std::result::Result<Vec<(DriverType, String)>, tokio::time::error::Elapsed> = Ok(results);
 
         match timeout_result {
             Ok(results) => {
@@ -226,7 +207,7 @@ impl DriverManager {
 
         for (driver_type, port) in processes {
             if self.is_service_running(port).await {
-                let endpoint = format!("http://localhost:{}", port);
+                let endpoint = format!("http://localhost:{port}");
                 healthy_endpoints_updated.insert(driver_type.clone(), endpoint);
                 debug!("Health check passed for {} on port {}", driver_type.browser_name(), port);
             } else {

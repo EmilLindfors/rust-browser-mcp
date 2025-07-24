@@ -1,47 +1,43 @@
 use anyhow::{Context, Result};
-use rmcp::{
-    ServiceExt,
-    model::{CallToolRequestParam, ClientCapabilities, ClientInfo, Implementation},
-    object,
-    service::Service,
-    transport::{
-        StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
-    },
-};
-use serde_json::Value;
 use std::io::{self, Write};
-use tokio::time::{Duration, sleep};
 
-/// Example OAuth client for WebDriver MCP
-/// Demonstrates how to authenticate and use the OAuth-protected MCP server
+/// Simple OAuth client example for WebDriver MCP
+/// This example shows how to manually get and use an OAuth token
+/// with the WebDriver MCP server
+/// 
+/// NOTE: This is a simplified example. For a full OAuth implementation using rmcp's 
+/// built-in OAuth support, see the rust-sdk/examples/clients/src/auth/oauth_client.rs
 
-struct OAuthMcpClient {
-    base_url: String,
-    access_token: Option<String>,
-}
+#[tokio::main]
+async fn main() -> Result<()> {
+    println!("WebDriver MCP OAuth Client Demo");
+    println!("===============================");
+    println!();
+    println!("This example demonstrates OAuth authentication with WebDriver MCP.");
+    println!();
+    
+    // Get server URL from environment or use default
+    let server_url = std::env::var("MCP_SERVER_URL")
+        .unwrap_or_else(|_| "http://localhost:3000".to_string());
+    
+    println!("Server URL: {}", server_url);
+    println!();
 
-impl OAuthMcpClient {
-    fn new(base_url: String) -> Self {
-        Self {
-            base_url,
-            access_token: None,
-        }
-    }
-
-    /// Manual OAuth flow - user needs to visit URL and get token
-    async fn authenticate_manual(&mut self) -> Result<()> {
-        println!("🔐 Manual OAuth Authentication");
-        println!("===============================");
+    // Check if token is provided via environment
+    if let Ok(token) = std::env::var("MCP_ACCESS_TOKEN") {
+        println!("Using token from environment variable");
+        test_token_with_http(&server_url, &token).await?;
+    } else {
+        // Manual authentication flow
+        println!("Manual OAuth Authentication");
+        println!("===========================");
         println!();
-        println!(
-            "1. Open your browser and visit: {}/oauth/authorize",
-            self.base_url
-        );
+        println!("1. Open your browser and visit: {}/oauth/authorize", server_url);
         println!("2. Complete the authorization process");
         println!("3. Copy the access token from the success page");
         println!();
 
-        print!("📝 Enter your access token: ");
+        print!("Enter your access token: ");
         io::stdout().flush()?;
 
         let mut token = String::new();
@@ -52,311 +48,240 @@ impl OAuthMcpClient {
             return Err(anyhow::anyhow!("No token provided"));
         }
 
-        self.access_token = Some(token);
-        println!("✅ Token stored successfully!");
-        Ok(())
-    }
-
-    /// Create an authenticated MCP client
-    async fn create_mcp_client(&self) -> Result<Service<StreamableHttpClientTransport>> {
-        let token = self
-            .access_token
-            .as_ref()
-            .context("Not authenticated. Call authenticate_manual() first")?;
-
-        // Create HTTP client with authorization header
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
-                .context("Failed to create authorization header")?,
-        );
-
-        let http_client = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()
-            .context("Failed to create HTTP client")?;
-
-        // Create transport with custom HTTP client
-        let config = StreamableHttpClientTransportConfig {
-            uri: format!("{}/mcp", self.base_url).into(),
-            ..Default::default()
-        };
-        let transport = StreamableHttpClientTransport::with_client(http_client, config);
-
-        let client_info = ClientInfo {
-            protocol_version: Default::default(),
-            capabilities: ClientCapabilities::default(),
-            client_info: Implementation {
-                name: "oauth-webdriver-mcp-client".to_string(),
-                version: "0.1.0".to_string(),
-            },
-        };
-
-        let client = client_info
-            .serve(transport)
-            .await
-            .context("Failed to connect to MCP server")?;
-
-        Ok(client)
-    }
-
-    /// List available tools
-    async fn list_tools(&self) -> Result<Vec<rmcp::model::Tool>> {
-        println!("📋 Listing available tools...");
-
-        let client = self.create_mcp_client().await?;
-        let tools = client
-            .list_all_tools()
-            .await
-            .context("Failed to list tools")?;
-
-        Ok(tools)
-    }
-
-    /// Call a specific tool
-    async fn call_tool(
-        &self,
-        tool_name: &str,
-        arguments: Option<Value>,
-    ) -> Result<rmcp::model::CallToolResult> {
-        println!("🔧 Calling tool: {}", tool_name);
-
-        let client = self.create_mcp_client().await?;
-        let result = client
-            .call_tool(CallToolRequestParam {
-                name: tool_name.into(),
-                arguments: arguments.or(Some(object!({}))),
-            })
-            .await
-            .context("Failed to call tool")?;
-
-        Ok(result)
-    }
-
-    /// Test WebDriver functionality
-    async fn test_webdriver(&self) -> Result<()> {
-        println!("🌐 Testing WebDriver functionality...");
+        println!("Token stored successfully!");
         println!();
-
-        // Test 1: Start browser driver
-        println!("1️⃣ Starting WebDriver...");
-        let start_result = self
-            .call_tool(
-                "start_driver",
-                Some(serde_json::json!({
-                    "driver_type": "firefox"
-                })),
-            )
-            .await;
-
-        match start_result {
-            Ok(result) => println!("   ✅ Driver started: {:?}", result.content.first()),
-            Err(e) => println!("   ⚠️  Driver start warning: {}", e),
-        }
-
-        sleep(Duration::from_secs(2)).await;
-
-        // Test 2: Navigate to a webpage
-        println!("2️⃣ Navigating to example.com...");
-        let nav_result = self
-            .call_tool(
-                "navigate",
-                Some(serde_json::json!({
-                    "url": "https://example.com"
-                })),
-            )
-            .await?;
-        println!("   ✅ Navigation result: {:?}", nav_result.content.first());
-
-        sleep(Duration::from_secs(3)).await;
-
-        // Test 3: Get page title
-        println!("3️⃣ Getting page title...");
-        let title_result = self.call_tool("get_title", None).await?;
-        println!("   ✅ Page title: {:?}", title_result.content.first());
-
-        // Test 4: Take a screenshot
-        println!("4️⃣ Taking screenshot...");
-        let screenshot_result = self.call_tool("screenshot", None).await?;
-        let screenshot_len = screenshot_result
-            .content
-            .first()
-            .map(|c| match &c.raw {
-                rmcp::model::RawContent::Text(text) => text.len(),
-                rmcp::model::RawContent::Resource(_) => 0,
-            })
-            .unwrap_or(0);
-        println!(
-            "   ✅ Screenshot taken (base64 length: {} chars)",
-            screenshot_len
-        );
-
-        // Test 5: Get current URL
-        println!("5️⃣ Getting current URL...");
-        let url_result = self.call_tool("get_current_url", None).await?;
-        println!("   ✅ Current URL: {:?}", url_result.content.first());
-
-        Ok(())
+        
+        test_token_with_http(&server_url, &token).await?;
     }
+
+    show_usage_examples(&server_url);
+    
+    Ok(())
 }
 
-async fn interactive_demo(client: &OAuthMcpClient) -> Result<()> {
-    println!("\n🎮 Interactive Demo Mode");
-    println!("======================");
-    println!("Available commands:");
-    println!("  1 - List all tools");
-    println!("  2 - Test WebDriver functionality");
-    println!("  3 - Navigate to custom URL");
-    println!("  4 - Get current URL");
-    println!("  5 - Quit browser session");
-    println!("  q - Quit demo");
-    println!();
+async fn test_token_with_http(server_url: &str, token: &str) -> Result<()> {
+    println!("Testing token validity...");
+    
+    let client = reqwest::Client::new();
+    
+    // Test with a simple MCP request
+    let response = client
+        .post(&format!("{}/mcp", server_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+        }))
+        .send()
+        .await
+        .context("Failed to send test request")?;
 
-    loop {
-        print!("demo> ");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let input = input.trim();
-
-        match input {
-            "1" => match client.list_tools().await {
-                Ok(tools) => {
-                    println!("\n📋 Available Tools:");
-                    for tool in tools {
-                        println!(
-                            "  • {} - {}",
-                            tool.name,
-                            tool.description.unwrap_or("No description".into())
-                        );
+    if response.status().is_success() {
+        let result: serde_json::Value = response.json().await?;
+        
+        if let Some(tools) = result.get("result").and_then(|r| r.get("tools")) {
+            let tool_count = tools.as_array().map(|arr| arr.len()).unwrap_or(0);
+            println!("Authentication successful! Found {} tools available.", tool_count);
+            
+            if let Some(tool_array) = tools.as_array() {
+                println!("\nAvailable tools:");
+                for tool in tool_array.iter().take(10) { // Show first 10 tools
+                    if let Some(name) = tool.get("name").and_then(|n| n.as_str()) {
+                        println!("  - {}", name);
                     }
-                    println!();
                 }
-                Err(e) => println!("❌ Error: {}", e),
-            },
-            "2" => {
-                if let Err(e) = client.test_webdriver().await {
-                    println!("❌ WebDriver test failed: {}", e);
+                if tool_array.len() > 10 {
+                    println!("  ... and {} more", tool_array.len() - 10);
                 }
             }
-            "3" => {
-                print!("Enter URL: ");
-                io::stdout().flush()?;
-                let mut url = String::new();
-                io::stdin().read_line(&mut url)?;
-                let url = url.trim();
-
-                match client
-                    .call_tool("navigate", Some(serde_json::json!({"url": url})))
-                    .await
-                {
-                    Ok(result) => println!("✅ Navigated: {:?}", result.content.first()),
-                    Err(e) => println!("❌ Navigation failed: {}", e),
-                }
-            }
-            "4" => match client.call_tool("get_current_url", None).await {
-                Ok(result) => println!("📍 Current URL: {:?}", result.content.first()),
-                Err(e) => println!("❌ Failed to get URL: {}", e),
-            },
-            "5" => match client.call_tool("stop_all_drivers", None).await {
-                Ok(result) => println!("🚪 All drivers stopped: {:?}", result.content.first()),
-                Err(e) => println!("❌ Failed to stop drivers: {}", e),
-            },
-            "q" => {
-                println!("👋 Goodbye!");
-                break;
-            }
-            "" => continue,
-            _ => {
-                println!("❓ Unknown command: {}", input);
-                println!("Available: 1, 2, 3, 4, 5, q");
-            }
+        } else {
+            println!("Token is valid but unexpected response format");
         }
+        
+        println!();
+        
+        // Test a WebDriver operation
+        println!("Testing WebDriver functionality...");
+        test_webdriver_operations(&client, server_url, token).await?;
+        
+    } else {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        println!("Token test failed: HTTP {} - {}", status, text);
+        println!("Make sure:");
+        println!("  1. The MCP server is running");
+        println!("  2. Your access token is valid");
+        println!("  3. The server URL is correct");
     }
 
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    println!("🤖 WebDriver MCP OAuth Client Demo");
-    println!("==================================");
-    println!();
+async fn test_webdriver_operations(client: &reqwest::Client, server_url: &str, token: &str) -> Result<()> {
+    // Test starting a driver
+    let response = client
+        .post(&format!("{}/mcp", server_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "start_driver",
+                "arguments": {
+                    "driver_type": "firefox"
+                }
+            }
+        }))
+        .send()
+        .await
+        .context("Failed to start driver")?;
 
-    // Create client
-    let server_url =
-        std::env::var("MCP_SERVER_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
-
-    let mut client = OAuthMcpClient::new(server_url.clone());
-
-    println!("🔗 Server URL: {}", server_url);
-    println!();
-
-    // Check if token is provided via environment
-    if let Ok(token) = std::env::var("MCP_ACCESS_TOKEN") {
-        println!("🔑 Using token from environment variable");
-        client.access_token = Some(token);
+    if response.status().is_success() {
+        let result: serde_json::Value = response.json().await?;
+        println!("  - Driver start: OK");
+        
+        if let Some(error) = result.get("error") {
+            println!("    Warning: {}", error);
+        }
     } else {
-        // Manual authentication
-        client.authenticate_manual().await?;
+        println!("  - Driver start: Failed ({})", response.status());
     }
 
+    // Test navigation
+    let response = client
+        .post(&format!("{}/mcp", server_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "navigate",
+                "arguments": {
+                    "url": "https://example.com"
+                }
+            }
+        }))
+        .send()
+        .await
+        .context("Failed to navigate")?;
+
+    if response.status().is_success() {
+        println!("  - Navigation: OK");
+    } else {
+        println!("  - Navigation: Failed ({})", response.status());
+    }
+
+    // Test getting page title
+    let response = client
+        .post(&format!("{}/mcp", server_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "get_title",
+                "arguments": {}
+            }
+        }))
+        .send()
+        .await
+        .context("Failed to get title")?;
+
+    if response.status().is_success() {
+        let result: serde_json::Value = response.json().await?;
+        if let Some(content) = result.get("result")
+            .and_then(|r| r.get("content"))
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|item| item.get("text"))
+            .and_then(|text| text.as_str())
+        {
+            println!("  - Page title: {}", content);
+        } else {
+            println!("  - Page title: Retrieved (but couldn't parse)");
+        }
+    } else {
+        println!("  - Page title: Failed ({})", response.status());
+    }
+
+    // Cleanup
+    let _cleanup_response = client
+        .post(&format!("{}/mcp", server_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "stop_all_drivers",
+                "arguments": {}
+            }
+        }))
+        .send()
+        .await;
+
+    println!("  - Cleanup: Done");
     println!();
+    println!("WebDriver functionality test completed!");
 
-    // Verify authentication by listing tools
-    match client.list_tools().await {
-        Ok(tools) => {
-            println!("✅ Authentication successful!");
-            println!("📋 Found {} tools:", tools.len());
-            for tool in &tools {
-                println!("  • {}", tool.name);
-            }
-            println!();
-        }
-        Err(e) => {
-            println!("❌ Authentication failed: {}", e);
-            println!("💡 Make sure:");
-            println!("   1. The MCP server is running");
-            println!("   2. Your access token is valid");
-            println!("   3. The server URL is correct");
-            return Ok(());
-        }
-    }
-
-    // Ask user what they want to do
-    println!("What would you like to do?");
-    println!("  1 - Run automated WebDriver test");
-    println!("  2 - Interactive demo mode");
-    println!();
-    print!("Choose (1 or 2): ");
-    io::stdout().flush()?;
-
-    let mut choice = String::new();
-    io::stdin().read_line(&mut choice)?;
-    let choice = choice.trim();
-
-    match choice {
-        "1" => {
-            println!("\n🚀 Running automated WebDriver test...");
-            if let Err(e) = client.test_webdriver().await {
-                println!("❌ Test failed: {}", e);
-            } else {
-                println!("\n🎉 All tests completed successfully!");
-            }
-        }
-        "2" => {
-            interactive_demo(&client).await?;
-        }
-        _ => {
-            println!("❓ Invalid choice, running automated test...");
-            if let Err(e) = client.test_webdriver().await {
-                println!("❌ Test failed: {}", e);
-            }
-        }
-    }
-
-    println!("\n✨ Demo completed!");
     Ok(())
+}
+
+fn show_usage_examples(server_url: &str) {
+    println!("\nHow to use your OAuth token:");
+    println!("============================");
+    
+    println!("\n1. Direct curl commands:");
+    println!("```bash");
+    println!("# List available tools");
+    println!("curl -H \"Authorization: Bearer YOUR_TOKEN\" \\");
+    println!("     -H \"Content-Type: application/json\" \\");
+    println!("     -d '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}}' \\");
+    println!("     {}/mcp", server_url);
+    println!();
+    println!("# Navigate to a webpage");
+    println!("curl -H \"Authorization: Bearer YOUR_TOKEN\" \\");
+    println!("     -H \"Content-Type: application/json\" \\");
+    println!("     -d '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"navigate\",\"arguments\":{{\"url\":\"https://example.com\"}}}}}}' \\");
+    println!("     {}/mcp", server_url);
+    println!("```");
+
+    println!("\n2. Environment variables for MCP clients:");
+    println!("```bash");
+    println!("export MCP_SERVER_URL=\"{}/mcp\"", server_url);
+    println!("export MCP_ACCESS_TOKEN=\"your_token_here\"");
+    println!("```");
+
+    println!("\n3. Claude MCP configuration:");
+    println!("```json");
+    println!("{{");
+    println!("  \"mcpServers\": {{");
+    println!("    \"webdriver\": {{");
+    println!("      \"command\": \"your-mcp-http-client\",");
+    println!("      \"env\": {{");
+    println!("        \"MCP_SERVER_URL\": \"{}/mcp\",", server_url);
+    println!("        \"MCP_AUTH_HEADER\": \"Authorization: Bearer YOUR_TOKEN\"");
+    println!("      }}");
+    println!("    }}");
+    println!("  }}");
+    println!("}}");
+    println!("```");
+
+    println!("\nToken Management Tips:");
+    println!("- This token expires in 1 hour (for demo mode)");
+    println!("- Store it securely and don't commit it to version control");
+    println!("- Generate a new token when this one expires");
+    println!("- In production, implement proper token refresh logic");
+    
+    println!("\nFor a full OAuth implementation using rmcp's built-in support,");
+    println!("see: rust-sdk/examples/clients/src/auth/oauth_client.rs");
 }

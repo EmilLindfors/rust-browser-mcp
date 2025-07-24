@@ -53,8 +53,13 @@ enum BrowserType {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    let default_log_level = if cfg!(debug_assertions) { "debug" } else { "error" };
+    
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_log_level))
+        )
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();

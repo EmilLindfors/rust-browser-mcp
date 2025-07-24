@@ -164,22 +164,35 @@ async fn test_new_mcp_tools_exist() -> Result<()> {
     config.auto_start_driver = false; // Disable auto-start for this test
     let _server = WebDriverServer::with_config(config)?;
 
-    // Test that ToolDefinitions includes our new tools
-    let all_tools = rust_browser_mcp::tools::ToolDefinitions::list_all();
-    let tool_names: Vec<&str> = all_tools.iter().map(|t| t.name.as_ref()).collect();
+    // Test that ToolDefinitions includes our new tools in stdio mode
+    let stdio_tools = rust_browser_mcp::tools::ToolDefinitions::list_for_mode(rust_browser_mcp::tools::ServerMode::Stdio);
+    let stdio_tool_names: Vec<&str> = stdio_tools.iter().map(|t| t.name.as_ref()).collect();
     
-    assert!(tool_names.contains(&"get_healthy_endpoints"), "get_healthy_endpoints tool should be exposed");
-    assert!(tool_names.contains(&"refresh_driver_health"), "refresh_driver_health tool should be exposed");
-    assert!(tool_names.contains(&"list_managed_drivers"), "list_managed_drivers tool should be exposed");
-    assert!(tool_names.contains(&"start_driver"), "start_driver tool should be exposed");
-    assert!(tool_names.contains(&"stop_driver"), "stop_driver tool should be exposed");
-    assert!(tool_names.contains(&"stop_all_drivers"), "stop_all_drivers tool should be exposed");
+    assert!(stdio_tool_names.contains(&"get_healthy_endpoints"), "get_healthy_endpoints tool should be exposed in stdio mode");
+    assert!(stdio_tool_names.contains(&"refresh_driver_health"), "refresh_driver_health tool should be exposed in stdio mode");
+    assert!(stdio_tool_names.contains(&"list_managed_drivers"), "list_managed_drivers tool should be exposed in stdio mode");
+    assert!(stdio_tool_names.contains(&"start_driver"), "start_driver tool should be exposed in stdio mode");
+    assert!(stdio_tool_names.contains(&"stop_driver"), "stop_driver tool should be exposed in stdio mode");
+    assert!(stdio_tool_names.contains(&"stop_all_drivers"), "stop_all_drivers tool should be exposed in stdio mode");
+
+    // Test that HTTP mode does NOT include driver lifecycle tools
+    let http_tools = rust_browser_mcp::tools::ToolDefinitions::list_for_mode(rust_browser_mcp::tools::ServerMode::Http);
+    let http_tool_names: Vec<&str> = http_tools.iter().map(|t| t.name.as_ref()).collect();
+    
+    assert!(!http_tool_names.contains(&"get_healthy_endpoints"), "get_healthy_endpoints tool should NOT be exposed in http mode");
+    assert!(!http_tool_names.contains(&"refresh_driver_health"), "refresh_driver_health tool should NOT be exposed in http mode");
+    assert!(!http_tool_names.contains(&"list_managed_drivers"), "list_managed_drivers tool should NOT be exposed in http mode");
+    assert!(!http_tool_names.contains(&"start_driver"), "start_driver tool should NOT be exposed in http mode");
+    assert!(!http_tool_names.contains(&"stop_driver"), "stop_driver tool should NOT be exposed in http mode");
+    assert!(!http_tool_names.contains(&"stop_all_drivers"), "stop_all_drivers tool should NOT be exposed in http mode");
 
     // Verify we have the expected number of tools
-    assert!(all_tools.len() >= 25, "Should have at least 25 tools with new additions");
+    assert!(stdio_tools.len() >= 25, "Should have at least 25 tools with new additions in stdio mode");
+    assert_eq!(http_tools.len(), stdio_tools.len() - 6, "HTTP mode should have 6 fewer tools than stdio mode");
 
-    println!("✅ Found {} MCP tools including new health monitoring tools", all_tools.len());
-    println!("📋 Available tools: {:?}", tool_names);
+    println!("✅ Found {} MCP tools including new health monitoring tools", stdio_tools.len());
+    println!("📋 STDIO mode tools: {:?}", stdio_tool_names);
+    println!("📋 HTTP mode tools: {:?}", http_tool_names);
 
     Ok(())
 }

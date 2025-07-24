@@ -264,6 +264,11 @@ impl ClientManager {
         &self.driver_manager
     }
 
+    /// Get access to the configuration
+    pub fn get_config(&self) -> &Config {
+        &self.config
+    }
+
     /// Close all active WebDriver sessions
     pub async fn close_all_sessions(&self) -> Result<()> {
         tracing::info!("Closing all active WebDriver sessions...");
