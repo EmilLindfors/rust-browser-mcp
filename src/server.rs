@@ -40,22 +40,43 @@ impl WebDriverServer {
                 let driver_manager = client_manager.get_driver_manager();
                 match driver_manager.start_concurrent_drivers(&drivers, timeout).await {
                     Ok(started_drivers) => {
-                        if started_drivers.is_empty() {
-                            tracing::warn!("No webdrivers could be started - server will continue without pre-started drivers");
-                        } else {
-                            tracing::info!("Successfully started {} webdrivers", started_drivers.len());
-                            for (driver_type, endpoint) in started_drivers {
-                                tracing::info!("  {} → {}", driver_type.browser_name(), endpoint);
+                        let requested_count = drivers.len();
+                        let started_count = started_drivers.len();
+                        
+                        if started_count == 0 {
+                            tracing::error!("Failed to start any WebDriver processes. Requested: {:?}. Server cannot function without at least one driver.", drivers);
+                            std::process::exit(1);
+                        } else if started_count < requested_count {
+                            // Some drivers failed - show warnings for what failed and info for what succeeded
+                            let started_types: std::collections::HashSet<_> = started_drivers.iter().map(|(dt, _)| dt.browser_name()).collect();
+                            for driver_name in &drivers {
+                                if let Some(driver_type) = crate::driver::DriverType::from_string(driver_name) {
+                                    if !started_types.contains(driver_type.browser_name()) {
+                                        tracing::warn!("Failed to start {} WebDriver - it may not be installed or accessible", driver_type.browser_name());
+                                    }
+                                }
                             }
                             
-                            // Start periodic health checks every 30 seconds
-                            let health_check_interval = std::time::Duration::from_secs(30);
-                            let _health_check_handle = driver_manager.start_periodic_health_checks(health_check_interval);
-                            tracing::info!("Started periodic health checks (every {:?})", health_check_interval);
+                            tracing::info!("Successfully started {}/{} WebDrivers:", started_count, requested_count);
+                            for (driver_type, endpoint) in &started_drivers {
+                                tracing::info!("  {} → {}", driver_type.browser_name(), endpoint);
+                            }
+                        } else {
+                            // All drivers started successfully
+                            tracing::info!("Successfully started all {} WebDrivers:", started_count);
+                            for (driver_type, endpoint) in &started_drivers {
+                                tracing::info!("  {} → {}", driver_type.browser_name(), endpoint);
+                            }
                         }
+                        
+                        // Start periodic health checks every 30 seconds
+                        let health_check_interval = std::time::Duration::from_secs(30);
+                        let _health_check_handle = driver_manager.start_periodic_health_checks(health_check_interval);
+                        tracing::info!("Started periodic health checks (every {:?})", health_check_interval);
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to start concurrent webdrivers: {} - server will continue with on-demand startup", e);
+                        tracing::error!("Critical failure starting WebDrivers: {} - server cannot function without drivers", e);
+                        std::process::exit(1);
                     }
                 }
             });
@@ -68,7 +89,20 @@ impl WebDriverServer {
     pub async fn cleanup(&self) -> crate::error::Result<()> {
         tracing::info!("WebDriver MCP Server shutting down...");
         
-        // Stop all managed drivers
+        // First close all active WebDriver sessions gracefully
+        tracing::info!("Closing active WebDriver sessions...");
+        if let Err(e) = self.client_manager.close_all_sessions().await {
+            tracing::warn!("Error closing WebDriver sessions: {}", e);
+        } else {
+            tracing::info!("WebDriver sessions closed successfully");
+        }
+        
+        // Add a small delay to allow session cleanup to complete
+        tracing::debug!("Waiting for session cleanup to complete...");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        
+        // Then stop all managed driver processes
+        tracing::info!("Stopping WebDriver processes...");
         match self.client_manager
             .get_driver_manager()
             .stop_all_drivers()
@@ -78,6 +112,7 @@ impl WebDriverServer {
             Err(e) => tracing::warn!("Error stopping WebDriver processes: {}", e),
         }
         
+        tracing::info!("WebDriver MCP Server cleanup completed");
         Ok(())
     }
 
@@ -1235,210 +1270,525 @@ impl WebDriverServer {
         }
     }
 
-    // WebDriver lifecycle management handlers
-
-    async fn handle_start_driver(
+    async fn handle_get_performance_metrics(
         &self,
         arguments: &Option<Map<String, Value>>,
     ) -> Result<CallToolResult, McpError> {
-        let driver_type_str = arguments
+        let include_resources = arguments
             .as_ref()
-            .and_then(|args| args.get("driver_type"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::invalid_params("Missing or invalid driver_type parameter", None)
-            })?;
+            .and_then(|args| args.get("include_resources"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let include_navigation = arguments
+            .as_ref()
+            .and_then(|args| args.get("include_navigation"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let include_paint = arguments
+            .as_ref()
+            .and_then(|args| args.get("include_paint"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let session_id = Self::extract_session_id(arguments);
 
-        let driver_type = match driver_type_str {
-            "firefox" => crate::driver::DriverType::Firefox,
-            "chrome" => crate::driver::DriverType::Chrome,
-            "edge" => crate::driver::DriverType::Edge,
-            _ => {
-                return Err(McpError::invalid_params(
-                    "Invalid driver_type. Must be 'firefox', 'chrome', or 'edge'",
-                    None,
-                ));
+        match self.client_manager.get_or_create_client(session_id).await {
+            Ok((session, client)) => {
+                let performance_script = format!(r#"
+                    const metrics = {{}};
+                    
+                    // Basic timing info
+                    if (performance.timing) {{
+                        metrics.timing = {{
+                            navigationStart: performance.timing.navigationStart,
+                            loadEventEnd: performance.timing.loadEventEnd,
+                            domContentLoadedEventEnd: performance.timing.domContentLoadedEventEnd,
+                            responseEnd: performance.timing.responseEnd,
+                            domComplete: performance.timing.domComplete
+                        }};
+                        
+                        metrics.calculated = {{
+                            pageLoadTime: performance.timing.loadEventEnd - performance.timing.navigationStart,
+                            domContentLoadedTime: performance.timing.domContentLoadedEventEnd - performance.timing.navigationStart,
+                            responseTime: performance.timing.responseEnd - performance.timing.navigationStart
+                        }};
+                    }}
+                    
+                    // Navigation timing (newer API)
+                    if ({include_navigation} && performance.getEntriesByType) {{
+                        const nav = performance.getEntriesByType('navigation')[0];
+                        if (nav) {{
+                            metrics.navigation = {{
+                                type: nav.type,
+                                redirectCount: nav.redirectCount,
+                                transferSize: nav.transferSize,
+                                encodedBodySize: nav.encodedBodySize,
+                                decodedBodySize: nav.decodedBodySize,
+                                duration: nav.duration,
+                                domContentLoadedEventStart: nav.domContentLoadedEventStart,
+                                domContentLoadedEventEnd: nav.domContentLoadedEventEnd,
+                                loadEventStart: nav.loadEventStart,
+                                loadEventEnd: nav.loadEventEnd
+                            }};
+                        }}
+                    }}
+                    
+                    // Resource timing
+                    if ({include_resources} && performance.getEntriesByType) {{
+                        const resources = performance.getEntriesByType('resource');
+                        metrics.resources = resources.map(r => ({{
+                            name: r.name,
+                            duration: r.duration,
+                            transferSize: r.transferSize,
+                            encodedBodySize: r.encodedBodySize,
+                            decodedBodySize: r.decodedBodySize,
+                            initiatorType: r.initiatorType
+                        }})).slice(0, 50); // Limit to first 50 resources
+                    }}
+                    
+                    // Paint timing
+                    if ({include_paint} && performance.getEntriesByType) {{
+                        const paintEntries = performance.getEntriesByType('paint');
+                        metrics.paint = {{}};
+                        paintEntries.forEach(entry => {{
+                            metrics.paint[entry.name] = entry.startTime;
+                        }});
+                    }}
+                    
+                    // Memory info if available
+                    if (performance.memory) {{
+                        metrics.memory = {{
+                            usedJSHeapSize: performance.memory.usedJSHeapSize,
+                            totalJSHeapSize: performance.memory.totalJSHeapSize,
+                            jsHeapSizeLimit: performance.memory.jsHeapSizeLimit
+                        }};
+                    }}
+                    
+                    return metrics;
+                "#, 
+                include_navigation = include_navigation,
+                include_resources = include_resources, 
+                include_paint = include_paint);
+
+                match client.execute(&performance_script, vec![]).await {
+                    Ok(result) => Ok(success_response(format!(
+                        "Performance metrics collected (session: {}):\n{:#?}",
+                        session, result
+                    ))),
+                    Err(e) => Ok(error_response(format!("Failed to collect performance metrics: {e}"))),
+                }
             }
-        };
+            Err(e) => Ok(error_response(format!("Failed to create webdriver client: {e}"))),
+        }
+    }
 
-        // Get access to the driver manager through client manager
-        match self
-            .client_manager
-            .get_driver_manager()
-            .start_driver_manually(driver_type.clone())
-            .await
-        {
-            Ok(endpoint) => {
-                let pid_info = self
-                    .client_manager
-                    .get_driver_manager()
-                    .get_managed_processes_status()
-                    .iter()
-                    .find(|(dt, _, _)| dt == &driver_type)
-                    .map(|(_, pid, port)| format!(" (PID: {pid}, Port: {port})"))
-                    .unwrap_or_default();
+    async fn handle_monitor_memory_usage(
+        &self,
+        arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        let duration_seconds = arguments
+            .as_ref()
+            .and_then(|args| args.get("duration_seconds"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(10.0);
+        let interval_ms = arguments
+            .as_ref()
+            .and_then(|args| args.get("interval_ms"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1000.0);
+        let include_gc_info = arguments
+            .as_ref()
+            .and_then(|args| args.get("include_gc_info"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let session_id = Self::extract_session_id(arguments);
 
+        match self.client_manager.get_or_create_client(session_id).await {
+            Ok((session, client)) => {
+                let memory_script = format!(r#"
+                    return new Promise((resolve) => {{
+                        const samples = [];
+                        const startTime = Date.now();
+                        const duration = {} * 1000;
+                        const interval = {};
+                        
+                        function collectSample() {{
+                            const sample = {{
+                                timestamp: Date.now() - startTime,
+                                url: window.location.href
+                            }};
+                            
+                            if (performance.memory) {{
+                                sample.memory = {{
+                                    usedJSHeapSize: performance.memory.usedJSHeapSize,
+                                    totalJSHeapSize: performance.memory.totalJSHeapSize,
+                                    jsHeapSizeLimit: performance.memory.jsHeapSizeLimit
+                                }};
+                            }}
+                            
+                            // Try to get GC info if available
+                            if ({} && performance.measureUserAgentSpecificMemory) {{
+                                performance.measureUserAgentSpecificMemory().then(result => {{
+                                    sample.detailedMemory = result;
+                                }}).catch(() => {{
+                                    // GC info not available
+                                }});
+                            }}
+                            
+                            samples.push(sample);
+                            
+                            if (Date.now() - startTime < duration) {{
+                                setTimeout(collectSample, interval);
+                            }} else {{
+                                // Calculate memory leak indicators
+                                const analysis = {{}};
+                                if (samples.length > 1) {{
+                                    const first = samples[0];
+                                    const last = samples[samples.length - 1];
+                                    
+                                    if (first.memory && last.memory) {{
+                                        analysis.memoryGrowth = {{
+                                            usedHeapGrowth: last.memory.usedJSHeapSize - first.memory.usedJSHeapSize,
+                                            totalHeapGrowth: last.memory.totalJSHeapSize - first.memory.totalJSHeapSize,
+                                            growthRate: (last.memory.usedJSHeapSize - first.memory.usedJSHeapSize) / (duration / 1000)
+                                        }};
+                                        
+                                        analysis.leakIndicators = {{
+                                            steadyGrowth: analysis.memoryGrowth.usedHeapGrowth > 1024 * 1024, // 1MB growth
+                                            highGrowthRate: analysis.memoryGrowth.growthRate > 512 * 1024 // 512KB/sec
+                                        }};
+                                    }}
+                                }}
+                                
+                                resolve({{
+                                    samples: samples,
+                                    analysis: analysis,
+                                    summary: {{
+                                        duration: duration,
+                                        sampleCount: samples.length,
+                                        interval: interval
+                                    }}
+                                }});
+                            }}
+                        }}
+                        
+                        collectSample();
+                    }});
+                "#, duration_seconds, interval_ms, include_gc_info);
+
+                match client.execute(&memory_script, vec![]).await {
+                    Ok(result) => Ok(success_response(format!(
+                        "Memory monitoring completed (session: {}):\n{:#?}",
+                        session, result
+                    ))),
+                    Err(e) => Ok(error_response(format!("Failed to monitor memory usage: {e}"))),
+                }
+            }
+            Err(e) => Ok(error_response(format!("Failed to create webdriver client: {e}"))),
+        }
+    }
+
+    async fn handle_run_performance_test(
+        &self,
+        arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        let test_actions = arguments
+            .as_ref()
+            .and_then(|args| args.get("test_actions"))
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| McpError::invalid_params("test_actions array is required", None))?;
+        let iterations = arguments
+            .as_ref()
+            .and_then(|args| args.get("iterations"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0) as usize;
+        let collect_screenshots = arguments
+            .as_ref()
+            .and_then(|args| args.get("collect_screenshots"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let session_id = Self::extract_session_id(arguments);
+
+        match self.client_manager.get_or_create_client(session_id).await {
+            Ok((session, client)) => {
+                let mut results = Vec::new();
+                
+                for iteration in 0..iterations {
+                    let mut iteration_results = Vec::new();
+                    
+                    // Start performance monitoring
+                    let start_script = r#"
+                        window.__perfTestStart = performance.now();
+                        window.__perfTestMarks = [];
+                        return "Performance test started";
+                    "#;
+                    client.execute(start_script, vec![]).await.ok();
+                    
+                    // Execute test actions
+                    for (action_idx, action) in test_actions.iter().enumerate() {
+                        let action_obj = action.as_object().ok_or_else(|| {
+                            McpError::invalid_params("Each test action must be an object", None)
+                        })?;
+                        
+                        let action_type = action_obj.get("type")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| McpError::invalid_params("Action type is required", None))?;
+                        
+                        let mark_script = format!(r#"
+                            window.__perfTestMarks.push({{
+                                action: "{}",
+                                index: {},
+                                timestamp: performance.now() - window.__perfTestStart
+                            }});
+                        "#, action_type, action_idx);
+                        client.execute(&mark_script, vec![]).await.ok();
+                        
+                        match action_type {
+                            "click" => {
+                                if let Some(selector) = action_obj.get("selector").and_then(|v| v.as_str()) {
+                                    if let Ok(element) = client.find(Locator::Css(selector)).await {
+                                        element.click().await.ok();
+                                    }
+                                }
+                            }
+                            "scroll" => {
+                                if let Some(selector) = action_obj.get("selector").and_then(|v| v.as_str()) {
+                                    let scroll_script = format!("document.querySelector('{}')?.scrollIntoView();", selector);
+                                    client.execute(&scroll_script, vec![]).await.ok();
+                                }
+                            }
+                            "wait" => {
+                                if let Some(duration_ms) = action_obj.get("duration_ms").and_then(|v| v.as_f64()) {
+                                    tokio::time::sleep(std::time::Duration::from_millis(duration_ms as u64)).await;
+                                }
+                            }
+                            "navigate" => {
+                                if let Some(url) = action_obj.get("url").and_then(|v| v.as_str()) {
+                                    client.goto(url).await.ok();
+                                }
+                            }
+                            _ => {
+                                // Unknown action type, skip
+                            }
+                        }
+                        
+                        // Small delay between actions
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    
+                    // Collect final metrics
+                    let end_script = r#"
+                        const endTime = performance.now();
+                        const testDuration = endTime - window.__perfTestStart;
+                        
+                        const result = {
+                            testDuration: testDuration,
+                            marks: window.__perfTestMarks,
+                            finalMetrics: {}
+                        };
+                        
+                        // Collect performance metrics
+                        if (performance.memory) {
+                            result.finalMetrics.memory = {
+                                usedJSHeapSize: performance.memory.usedJSHeapSize,
+                                totalJSHeapSize: performance.memory.totalJSHeapSize,
+                                jsHeapSizeLimit: performance.memory.jsHeapSizeLimit
+                            };
+                        }
+                        
+                        // Collect paint metrics
+                        const paintEntries = performance.getEntriesByType('paint');
+                        result.finalMetrics.paint = {};
+                        paintEntries.forEach(entry => {
+                            result.finalMetrics.paint[entry.name] = entry.startTime;
+                        });
+                        
+                        return result;
+                    "#;
+                    
+                    match client.execute(end_script, vec![]).await {
+                        Ok(iteration_result) => {
+                            iteration_results.push(iteration_result);
+                            
+                            if collect_screenshots {
+                                if let Ok(screenshot) = client.screenshot().await {
+                                    // Convert screenshot to base64
+                                    let screenshot_b64 = general_purpose::STANDARD.encode(&screenshot);
+                                    iteration_results.push(serde_json::json!({
+                                        "screenshot": format!("data:image/png;base64,{}", screenshot_b64)
+                                    }));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            iteration_results.push(serde_json::json!({
+                                "error": format!("Failed to collect metrics: {}", e)
+                            }));
+                        }
+                    }
+                    
+                    results.push(serde_json::json!({
+                        "iteration": iteration,
+                        "results": iteration_results
+                    }));
+                }
+                
                 Ok(success_response(format!(
-                    "Successfully started {} WebDriver at {}{}",
-                    driver_type.browser_name(),
-                    endpoint,
-                    pid_info
+                    "Performance test completed (session: {}):\n{:#?}",
+                    session, results
                 )))
             }
-            Err(e) => Ok(error_response(format!(
-                "Failed to start {} WebDriver: {}",
-                driver_type.browser_name(),
-                e
-            ))),
+            Err(e) => Ok(error_response(format!("Failed to create webdriver client: {e}"))),
         }
     }
 
-    async fn handle_stop_driver(
+    async fn handle_monitor_resource_usage(
         &self,
         arguments: &Option<Map<String, Value>>,
     ) -> Result<CallToolResult, McpError> {
-        let driver_type_str = arguments
+        let duration_seconds = arguments
             .as_ref()
-            .and_then(|args| args.get("driver_type"))
+            .and_then(|args| args.get("duration_seconds"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(30.0);
+        let include_network = arguments
+            .as_ref()
+            .and_then(|args| args.get("include_network"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let include_cpu = arguments
+            .as_ref()
+            .and_then(|args| args.get("include_cpu"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let include_fps = arguments
+            .as_ref()
+            .and_then(|args| args.get("include_fps"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let network_filter = arguments
+            .as_ref()
+            .and_then(|args| args.get("network_filter"))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::invalid_params("Missing or invalid driver_type parameter", None)
-            })?;
+            .unwrap_or(".*");
+        let session_id = Self::extract_session_id(arguments);
 
-        let driver_type = match driver_type_str {
-            "firefox" => crate::driver::DriverType::Firefox,
-            "chrome" => crate::driver::DriverType::Chrome,
-            "edge" => crate::driver::DriverType::Edge,
-            _ => {
-                return Err(McpError::invalid_params(
-                    "Invalid driver_type. Must be 'firefox', 'chrome', or 'edge'",
-                    None,
-                ));
+        match self.client_manager.get_or_create_client(session_id).await {
+            Ok((session, client)) => {
+                let resource_script = format!(r#"
+                    return new Promise((resolve) => {{
+                        const results = {{
+                            network: [],
+                            fps: [],
+                            cpu: [],
+                            summary: {{}}
+                        }};
+                        
+                        const startTime = performance.now();
+                        const duration = {} * 1000;
+                        const networkFilter = new RegExp('{}');
+                        
+                        // Network monitoring
+                        if ({}) {{
+                            const observer = new PerformanceObserver((list) => {{
+                                for (const entry of list.getEntries()) {{
+                                    if (entry.entryType === 'resource' && networkFilter.test(entry.name)) {{
+                                        results.network.push({{
+                                            name: entry.name,
+                                            type: entry.initiatorType,
+                                            duration: entry.duration,
+                                            transferSize: entry.transferSize,
+                                            encodedBodySize: entry.encodedBodySize,
+                                            startTime: entry.startTime,
+                                            responseEnd: entry.responseEnd
+                                        }});
+                                    }}
+                                }}
+                            }});
+                            observer.observe({{entryTypes: ['resource']}});
+                        }}
+                        
+                        // FPS monitoring
+                        if ({}) {{
+                            let frameCount = 0;
+                            let lastTime = performance.now();
+                            
+                            function countFrame() {{
+                                frameCount++;
+                                const currentTime = performance.now();
+                                
+                                if (currentTime - lastTime >= 1000) {{
+                                    results.fps.push({{
+                                        timestamp: currentTime - startTime,
+                                        fps: frameCount
+                                    }});
+                                    frameCount = 0;
+                                    lastTime = currentTime;
+                                }}
+                                
+                                if (currentTime - startTime < duration) {{
+                                    requestAnimationFrame(countFrame);
+                                }}
+                            }}
+                            requestAnimationFrame(countFrame);
+                        }}
+                        
+                        // CPU monitoring (approximation using timing)
+                        if ({}) {{
+                            let cpuSamples = [];
+                            
+                            function sampleCPU() {{
+                                const start = performance.now();
+                                
+                                // Perform a small CPU-intensive task to measure responsiveness
+                                let sum = 0;
+                                for (let i = 0; i < 10000; i++) {{
+                                    sum += Math.random();
+                                }}
+                                
+                                const end = performance.now();
+                                const cpuTime = end - start;
+                                
+                                cpuSamples.push({{
+                                    timestamp: start - startTime,
+                                    taskTime: cpuTime,
+                                    responsiveness: cpuTime < 5 ? 'good' : cpuTime < 15 ? 'fair' : 'poor'
+                                }});
+                                
+                                if (end - startTime < duration) {{
+                                    setTimeout(sampleCPU, 1000);
+                                }}
+                            }}
+                            setTimeout(sampleCPU, 100);
+                        }}
+                        
+                        // Final collection
+                        setTimeout(() => {{
+                            results.summary = {{
+                                duration: duration,
+                                networkRequests: results.network.length,
+                                averageFPS: results.fps.length > 0 ? 
+                                    results.fps.reduce((a, b) => a + b.fps, 0) / results.fps.length : 0,
+                                totalTransferSize: results.network.reduce((a, b) => a + (b.transferSize || 0), 0),
+                                slowRequests: results.network.filter(r => r.duration > 1000).length
+                            }};
+                            
+                            resolve(results);
+                        }}, duration + 100);
+                    }});
+                "#, duration_seconds, network_filter, include_network, include_fps, include_cpu);
+
+                match client.execute(&resource_script, vec![]).await {
+                    Ok(result) => Ok(success_response(format!(
+                        "Resource usage monitoring completed (session: {}):\n{:#?}",
+                        session, result
+                    ))),
+                    Err(e) => Ok(error_response(format!("Failed to monitor resource usage: {e}"))),
+                }
             }
-        };
-
-        match self
-            .client_manager
-            .get_driver_manager()
-            .stop_driver_by_type(&driver_type)
-            .await
-        {
-            Ok(()) => Ok(success_response(format!(
-                "Successfully stopped {} WebDriver processes",
-                driver_type.browser_name()
-            ))),
-            Err(e) => Ok(error_response(format!(
-                "Failed to stop {} WebDriver: {}",
-                driver_type.browser_name(),
-                e
-            ))),
+            Err(e) => Ok(error_response(format!("Failed to create webdriver client: {e}"))),
         }
     }
 
-    async fn handle_stop_all_drivers(
-        &self,
-        _arguments: &Option<Map<String, Value>>,
-    ) -> Result<CallToolResult, McpError> {
-        match self
-            .client_manager
-            .get_driver_manager()
-            .stop_all_drivers()
-            .await
-        {
-            Ok(()) => Ok(success_response(
-                "Successfully stopped all managed WebDriver processes".to_string(),
-            )),
-            Err(e) => Ok(error_response(format!(
-                "Failed to stop WebDriver processes: {e}"
-            ))),
-        }
-    }
-
-    async fn handle_list_managed_drivers(
-        &self,
-        _arguments: &Option<Map<String, Value>>,
-    ) -> Result<CallToolResult, McpError> {
-        let processes = self
-            .client_manager
-            .get_driver_manager()
-            .get_managed_processes_status();
-
-        if processes.is_empty() {
-            Ok(success_response(
-                "No managed WebDriver processes currently running".to_string(),
-            ))
-        } else {
-            let mut status_lines = vec!["Managed WebDriver processes:".to_string()];
-            for (driver_type, pid, port) in processes {
-                status_lines.push(format!(
-                    "  - {} (PID: {}, Port: {})",
-                    driver_type.browser_name(),
-                    pid,
-                    port
-                ));
-            }
-            Ok(success_response(status_lines.join("\n")))
-        }
-    }
-
-    async fn handle_get_healthy_endpoints(
-        &self,
-        _arguments: &Option<Map<String, Value>>,
-    ) -> Result<CallToolResult, McpError> {
-        let healthy_endpoints = self
-            .client_manager
-            .get_driver_manager()
-            .get_healthy_endpoints();
-
-        if healthy_endpoints.is_empty() {
-            Ok(success_response(
-                "No healthy WebDriver endpoints currently available. Try starting drivers or refreshing health status.".to_string(),
-            ))
-        } else {
-            let mut status_lines = vec!["Healthy WebDriver endpoints:".to_string()];
-            for (driver_type, endpoint) in healthy_endpoints {
-                status_lines.push(format!(
-                    "  - {} → {}",
-                    driver_type.browser_name(),
-                    endpoint
-                ));
-            }
-            Ok(success_response(status_lines.join("\n")))
-        }
-    }
-
-    async fn handle_refresh_driver_health(
-        &self,
-        _arguments: &Option<Map<String, Value>>,
-    ) -> Result<CallToolResult, McpError> {
-        match self
-            .client_manager
-            .get_driver_manager()
-            .refresh_driver_health()
-            .await
-        {
-            Ok(()) => {
-                let healthy_endpoints = self
-                    .client_manager
-                    .get_driver_manager()
-                    .get_healthy_endpoints();
-
-                let message = if healthy_endpoints.is_empty() {
-                    "Health check completed. No healthy endpoints found.".to_string()
-                } else {
-                    format!(
-                        "Health check completed. {} healthy endpoints found.",
-                        healthy_endpoints.len()
-                    )
-                };
-
-                Ok(success_response(message))
-            }
-            Err(e) => Ok(error_response(format!(
-                "Failed to refresh driver health: {e}"
-            ))),
-        }
-    }
 }
 
 impl ServerHandler for WebDriverServer {
@@ -1497,13 +1847,10 @@ impl ServerHandler for WebDriverServer {
             "fill_and_submit_form" => self.handle_fill_and_submit_form(&request.arguments).await,
             "login_form" => self.handle_login_form(&request.arguments).await,
             "get_console_logs" => self.handle_get_console_logs(&request.arguments).await,
-            // WebDriver lifecycle management
-            "start_driver" => self.handle_start_driver(&request.arguments).await,
-            "stop_driver" => self.handle_stop_driver(&request.arguments).await,
-            "stop_all_drivers" => self.handle_stop_all_drivers(&request.arguments).await,
-            "list_managed_drivers" => self.handle_list_managed_drivers(&request.arguments).await,
-            "get_healthy_endpoints" => self.handle_get_healthy_endpoints(&request.arguments).await,
-            "refresh_driver_health" => self.handle_refresh_driver_health(&request.arguments).await,
+            "get_performance_metrics" => self.handle_get_performance_metrics(&request.arguments).await,
+            "monitor_memory_usage" => self.handle_monitor_memory_usage(&request.arguments).await,
+            "run_performance_test" => self.handle_run_performance_test(&request.arguments).await,
+            "monitor_resource_usage" => self.handle_monitor_resource_usage(&request.arguments).await,
             _ => Err(McpError::method_not_found::<CallToolRequestMethod>()),
         }
     }

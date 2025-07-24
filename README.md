@@ -80,6 +80,7 @@ Browser automation for Claude via the Model Context Protocol (MCP).
 - **Information**: `find_element`, `get_text`, `get_attribute`, `screenshot`
 - **Forms**: `fill_and_submit_form`
 - **Advanced**: `execute_script`
+- **Performance Monitoring**: `get_performance_metrics`, `monitor_memory_usage`, `run_performance_test`, `monitor_resource_usage`
 
 ## Features
 
@@ -101,6 +102,17 @@ Browser automation for Claude via the Model Context Protocol (MCP).
 - `refresh_driver_health`: Manually refresh driver health status
 - `start_driver` / `stop_driver`: Manual driver lifecycle control
 
+### 📊 Performance Monitoring & Testing
+- **`get_performance_metrics`**: Comprehensive timing, navigation, and resource loading metrics
+- **`monitor_memory_usage`**: Track JavaScript heap memory over time with leak detection
+- **`run_performance_test`**: Automated user interaction testing with performance tracking
+- **`monitor_resource_usage`**: Monitor network requests, FPS, and CPU responsiveness
+
+Enable enhanced Chrome memory APIs with:
+```bash
+export WEBDRIVER_ENABLE_PERFORMANCE_MEMORY="true"
+```
+
 ## Configuration
 
 ### Command Line Options
@@ -113,6 +125,9 @@ rust-browser-mcp --browser edge --transport stdio
 
 # HTTP mode
 rust-browser-mcp --transport http --bind 0.0.0.0:8080 --browser firefox
+
+# Enable performance memory monitoring
+rust-browser-mcp --browser chrome --enable-performance-memory --transport http --no-auth
 ```
 
 Options:
@@ -120,6 +135,7 @@ Options:
 - `--transport, -t`: Server transport mode (stdio, http) - defaults to stdio
 - `--bind`: HTTP server bind address (only used with --transport=http) - defaults to 127.0.0.1:8080
 - `--no-auth`: Disable OAuth authentication for HTTP server
+- `--enable-performance-memory`: Enable Chrome performance memory APIs for enhanced memory monitoring
 
 ### Environment Variables
 
@@ -129,6 +145,7 @@ export WEBDRIVER_HEADLESS="true"                        # run browser headless
 export WEBDRIVER_CONCURRENT_DRIVERS="firefox,chrome"    # comma-separated list of drivers to auto-start
 export WEBDRIVER_STARTUP_TIMEOUT_MS="10000"             # driver startup timeout in milliseconds
 export WEBDRIVER_AUTO_START="true"                      # enable auto-start (default: true)
+export WEBDRIVER_ENABLE_PERFORMANCE_MEMORY="true"       # enable Chrome memory performance APIs (default: false)
 ```
 
 For Firefox specifically:

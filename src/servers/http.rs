@@ -70,12 +70,22 @@ pub async fn run_http_server(server: WebDriverServer, bind_addr: &str, no_auth: 
             signal::ctrl_c()
                 .await
                 .expect("Failed to install Ctrl+C handler");
-            tracing::info!("Received shutdown signal, stopping HTTP server...");
+            tracing::info!("Received shutdown signal (Ctrl+C), initiating graceful shutdown...");
             
-            // Cleanup WebDriver processes before shutdown
-            if let Err(e) = server_for_cleanup.cleanup().await {
-                tracing::warn!("Error during WebDriver cleanup: {}", e);
+            // Cleanup WebDriver processes before shutdown with timeout
+            let cleanup_timeout = std::time::Duration::from_secs(8);
+            tracing::info!("Starting WebDriver cleanup with {:?} timeout...", cleanup_timeout);
+            
+            match tokio::time::timeout(cleanup_timeout, server_for_cleanup.cleanup()).await {
+                Ok(Ok(())) => tracing::info!("WebDriver cleanup completed successfully"),
+                Ok(Err(e)) => tracing::warn!("Error during WebDriver cleanup: {}", e),
+                Err(_) => {
+                    tracing::warn!("WebDriver cleanup timed out after {:?}, forcing server shutdown", cleanup_timeout);
+                    tracing::warn!("Some WebDriver processes may still be running");
+                }
             }
+            
+            tracing::info!("Graceful shutdown sequence completed");
         })
         .await?;
 

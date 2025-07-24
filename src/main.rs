@@ -25,6 +25,10 @@ struct Cli {
     /// Browser driver to use
     #[arg(short, long, default_value = "chrome")]
     browser: BrowserType,
+
+    /// Enable Chrome performance memory APIs for enhanced memory monitoring
+    #[arg(long)]
+    enable_performance_memory: bool,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -55,13 +59,22 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    // Create config with preferred browser
+    // Create config with preferred browser and CLI options
     let mut config = Config::from_env();
-    config.preferred_driver = Some(match cli.browser {
+    let preferred_browser = match cli.browser {
         BrowserType::Chrome => "chrome".to_string(),
         BrowserType::Firefox => "firefox".to_string(),
         BrowserType::Edge => "edge".to_string(),
-    });
+    };
+    
+    config.preferred_driver = Some(preferred_browser.clone());
+    // When a specific browser is chosen via CLI, only start that browser instead of all concurrent drivers
+    config.concurrent_drivers = vec![preferred_browser];
+    
+    // Override performance memory setting from CLI if provided
+    if cli.enable_performance_memory {
+        config.enable_performance_memory = true;
+    }
 
     let server = WebDriverServer::with_config(config).inspect_err(|e| {
         tracing::error!("Failed to create WebDriver server: {}", e);

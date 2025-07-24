@@ -31,13 +31,10 @@ impl ToolDefinitions {
             Self::fill_and_submit_form_tool(),
             Self::login_form_tool(),
             Self::get_console_logs_tool(),
-            // WebDriver lifecycle management tools
-            Self::start_driver_tool(),
-            Self::stop_driver_tool(),
-            Self::stop_all_drivers_tool(),
-            Self::list_managed_drivers_tool(),
-            Self::get_healthy_endpoints_tool(),
-            Self::refresh_driver_health_tool(),
+            Self::get_performance_metrics_tool(),
+            Self::monitor_memory_usage_tool(),
+            Self::run_performance_test_tool(),
+            Self::monitor_resource_usage_tool(),
         ]
     }
 
@@ -661,131 +658,154 @@ impl ToolDefinitions {
         }
     }
 
-    fn start_driver_tool() -> Tool {
+    fn get_performance_metrics_tool() -> Tool {
         Tool {
-            name: "start_driver".into(),
-            description: Some("Manually start a WebDriver process. Note: The server auto-starts drivers on startup, so this is usually not needed.".into()),
-            input_schema: Arc::new(
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "driver_type": {
-                            "type": "string",
-                            "enum": ["firefox", "chrome", "edge"],
-                            "description": "Type of WebDriver to start"
+            name: "get_performance_metrics".into(),
+            description: Some("Get comprehensive performance metrics including timing, navigation, and resource loading data".into()),
+            input_schema: Arc::new(json!({
+                "type": "object",
+                "properties": {
+                    "include_resources": {
+                        "type": "boolean",
+                        "description": "Include resource timing data (default: true)"
+                    },
+                    "include_navigation": {
+                        "type": "boolean", 
+                        "description": "Include navigation timing data (default: true)"
+                    },
+                    "include_paint": {
+                        "type": "boolean",
+                        "description": "Include paint timing data (default: true)"
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional session ID (defaults to 'default')"
+                    }
+                }
+            }).as_object().unwrap().clone()),
+            annotations: None,
+        }
+    }
+
+    fn monitor_memory_usage_tool() -> Tool {
+        Tool {
+            name: "monitor_memory_usage".into(),
+            description: Some("Monitor JavaScript heap memory usage and detect potential memory leaks".into()),
+            input_schema: Arc::new(json!({
+                "type": "object",
+                "properties": {
+                    "duration_seconds": {
+                        "type": "number",
+                        "description": "Duration to monitor in seconds (default: 10)"
+                    },
+                    "interval_ms": {
+                        "type": "number",
+                        "description": "Sampling interval in milliseconds (default: 1000)"
+                    },
+                    "include_gc_info": {
+                        "type": "boolean",
+                        "description": "Include garbage collection information if available (default: true)"
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional session ID (defaults to 'default')"
+                    }
+                }
+            }).as_object().unwrap().clone()),
+            annotations: None,
+        }
+    }
+
+    fn run_performance_test_tool() -> Tool {
+        Tool {
+            name: "run_performance_test".into(),
+            description: Some("Run automated performance test with user interactions and collect comprehensive metrics".into()),
+            input_schema: Arc::new(json!({
+                "type": "object",
+                "properties": {
+                    "test_actions": {
+                        "type": "array",
+                        "description": "Array of actions to perform during test",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "enum": ["click", "scroll", "wait", "navigate"],
+                                    "description": "Type of action to perform"
+                                },
+                                "selector": {
+                                    "type": "string",
+                                    "description": "CSS selector for click/scroll actions"
+                                },
+                                "url": {
+                                    "type": "string", 
+                                    "description": "URL for navigate actions"
+                                },
+                                "duration_ms": {
+                                    "type": "number",
+                                    "description": "Duration for wait actions in milliseconds"
+                                }
+                            },
+                            "required": ["type"]
                         }
                     },
-                    "required": ["driver_type"]
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            ),
-            annotations: None,
-        }
-    }
-
-    fn stop_driver_tool() -> Tool {
-        Tool {
-            name: "stop_driver".into(),
-            description: Some("Stop a specific type of WebDriver process".into()),
-            input_schema: Arc::new(
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "driver_type": {
-                            "type": "string",
-                            "enum": ["firefox", "chrome", "edge"],
-                            "description": "Type of WebDriver to stop"
-                        }
+                    "iterations": {
+                        "type": "number",
+                        "description": "Number of test iterations (default: 1)"
                     },
-                    "required": ["driver_type"]
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            ),
+                    "collect_screenshots": {
+                        "type": "boolean",
+                        "description": "Take screenshots during test (default: false)"
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional session ID (defaults to 'default')"
+                    }
+                },
+                "required": ["test_actions"]
+            }).as_object().unwrap().clone()),
             annotations: None,
         }
     }
 
-    fn stop_all_drivers_tool() -> Tool {
+    fn monitor_resource_usage_tool() -> Tool {
         Tool {
-            name: "stop_all_drivers".into(),
-            description: Some("Stop all managed WebDriver processes".into()),
-            input_schema: Arc::new(
-                json!({
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            ),
+            name: "monitor_resource_usage".into(),
+            description: Some("Monitor network requests, CPU usage, and rendering performance metrics".into()),
+            input_schema: Arc::new(json!({
+                "type": "object",
+                "properties": {
+                    "duration_seconds": {
+                        "type": "number",
+                        "description": "Duration to monitor in seconds (default: 30)"
+                    },
+                    "include_network": {
+                        "type": "boolean",
+                        "description": "Monitor network requests (default: true)"
+                    },
+                    "include_cpu": {
+                        "type": "boolean",
+                        "description": "Monitor CPU usage if available (default: true)"
+                    },
+                    "include_fps": {
+                        "type": "boolean",
+                        "description": "Monitor frame rate performance (default: true)"
+                    },
+                    "network_filter": {
+                        "type": "string",
+                        "description": "Filter network requests by URL pattern (regex)"
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional session ID (defaults to 'default')"
+                    }
+                }
+            }).as_object().unwrap().clone()),
             annotations: None,
         }
     }
 
-    fn list_managed_drivers_tool() -> Tool {
-        Tool {
-            name: "list_managed_drivers".into(),
-            description: Some(
-                "List all currently managed WebDriver processes with their status. Shows drivers auto-started by the server.".into(),
-            ),
-            input_schema: Arc::new(
-                json!({
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            ),
-            annotations: None,
-        }
-    }
-
-    fn get_healthy_endpoints_tool() -> Tool {
-        Tool {
-            name: "get_healthy_endpoints".into(),
-            description: Some(
-                "Get all healthy WebDriver endpoints available for session creation".into(),
-            ),
-            input_schema: Arc::new(
-                json!({
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            ),
-            annotations: None,
-        }
-    }
-
-    fn refresh_driver_health_tool() -> Tool {
-        Tool {
-            name: "refresh_driver_health".into(),
-            description: Some(
-                "Manually refresh the health status of all managed WebDriver endpoints".into(),
-            ),
-            input_schema: Arc::new(
-                json!({
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            ),
-            annotations: None,
-        }
-    }
 }
 
 pub fn success_response(message: String) -> rmcp::model::CallToolResult {

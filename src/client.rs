@@ -91,17 +91,29 @@ impl ClientManager {
             // Chrome capabilities (default)
             caps.insert("browserName".to_string(), json!("chrome"));
 
+            let mut chrome_options = serde_json::Map::new();
+            let mut chrome_args = Vec::new();
+            
             if self.config.headless {
-                let mut chrome_options = serde_json::Map::new();
-                chrome_options.insert(
-                    "args".to_string(),
-                    json!([
-                        "--headless",
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu"
-                    ]),
-                );
+                chrome_args.extend_from_slice(&[
+                    "--headless",
+                    "--no-sandbox", 
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu"
+                ]);
+            }
+            
+            if self.config.enable_performance_memory {
+                chrome_args.extend_from_slice(&[
+                    "--enable-precise-memory-info",
+                    "--enable-memory-pressure-api",
+                    "--enable-aggressive-domstorage-flushing",
+                    "--js-flags=--expose-gc"
+                ]);
+            }
+            
+            if !chrome_args.is_empty() {
+                chrome_options.insert("args".to_string(), json!(chrome_args));
                 caps.insert("goog:chromeOptions".to_string(), json!(chrome_options));
             }
         }
@@ -250,6 +262,30 @@ impl ClientManager {
     /// Get access to the driver manager for lifecycle operations
     pub fn get_driver_manager(&self) -> &DriverManager {
         &self.driver_manager
+    }
+
+    /// Close all active WebDriver sessions
+    pub async fn close_all_sessions(&self) -> Result<()> {
+        tracing::info!("Closing all active WebDriver sessions...");
+        let mut clients = self.clients.lock().await;
+        
+        for (session_id, client) in clients.drain() {
+            tracing::debug!("Closing session: {}", session_id);
+            
+            // Add timeout to individual session close operations
+            let close_timeout = Duration::from_secs(2);
+            match tokio::time::timeout(close_timeout, client.close()).await {
+                Ok(Ok(())) => tracing::debug!("Successfully closed session: {}", session_id),
+                Ok(Err(e)) => tracing::warn!("Error closing session {}: {}", session_id, e),
+                Err(_) => {
+                    tracing::warn!("Timeout closing session {} after {:?}, forcing cleanup", session_id, close_timeout);
+                    // Session close timed out, but continue with other sessions
+                }
+            }
+        }
+        
+        tracing::info!("All WebDriver sessions closed");
+        Ok(())
     }
 
     pub async fn find_element_with_wait(

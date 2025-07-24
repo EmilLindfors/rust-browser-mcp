@@ -11,6 +11,8 @@ pub struct Config {
     pub concurrent_drivers: Vec<String>,
     /// Timeout for driver startup in milliseconds
     pub driver_startup_timeout_ms: u64,
+    /// Enable Chrome performance memory APIs
+    pub enable_performance_memory: bool,
 }
 
 impl Config {
@@ -36,6 +38,9 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(10000), // Default to 10 seconds
+            enable_performance_memory: env::var("WEBDRIVER_ENABLE_PERFORMANCE_MEMORY")
+                .map(|v| v.to_lowercase() == "true" || v == "1")
+                .unwrap_or(false), // Default to false for compatibility
         }
     }
 
@@ -107,6 +112,7 @@ WebDriver MCP Server Setup:
    - WEBDRIVER_HEADLESS: true (default) or false for GUI mode
    - WEBDRIVER_CONCURRENT_DRIVERS: comma-separated list (default: firefox,chrome)
    - WEBDRIVER_STARTUP_TIMEOUT_MS: Driver startup timeout (default: 10000)
+   - WEBDRIVER_ENABLE_PERFORMANCE_MEMORY: true or false (default: false) - enables Chrome memory APIs
 
 3. Manual Setup (if auto-start disabled):
    - Chrome: chromedriver --port=9515
