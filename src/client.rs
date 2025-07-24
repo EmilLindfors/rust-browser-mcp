@@ -41,8 +41,8 @@ impl ClientManager {
             }
         }
 
-        // Determine the actual endpoint to use
-        let endpoint = self.resolve_webdriver_endpoint().await?;
+        // Determine the actual endpoint to use based on session preferences
+        let endpoint = self.resolve_webdriver_endpoint_for_session(&session).await?;
 
         // Create client with proper browser configuration
         let client = self
@@ -144,25 +144,80 @@ impl ClientManager {
         }
     }
 
-    async fn resolve_webdriver_endpoint(&self) -> Result<String> {
-        // If endpoint is "auto", try to auto-start a driver
-        if self.config.webdriver_endpoint == "auto" && self.config.auto_start_driver {
-            tracing::info!("Auto-detecting and starting WebDriver service...");
+    async fn resolve_webdriver_endpoint_for_session(&self, session_id: &str) -> Result<String> {
+        // If endpoint is "auto", try to use pre-started drivers first
+        if self.config.webdriver_endpoint == "auto" {
+            // Check for healthy pre-started drivers
+            let healthy_endpoints = self.driver_manager.get_healthy_endpoints();
+            
+            if !healthy_endpoints.is_empty() {
+                // Check if session ID specifies a browser preference (e.g., "firefox_session1", "chrome_default")
+                let preferred_driver = self.extract_browser_preference_from_session(session_id);
+                
+                // Try preferred driver from session ID first
+                if let Some(driver_type) = preferred_driver {
+                    if let Some(endpoint) = healthy_endpoints.get(&driver_type) {
+                        tracing::info!("Using {} driver at {} for session '{}'", driver_type.browser_name(), endpoint, session_id);
+                        return Ok(endpoint.clone());
+                    }
+                }
+                
+                // Try preferred driver from config second
+                if let Some(preferred) = &self.config.preferred_driver {
+                    if let Some(driver_type) = crate::driver::DriverType::from_string(preferred) {
+                        if let Some(endpoint) = healthy_endpoints.get(&driver_type) {
+                            tracing::info!("Using configured preferred {} driver at {} for session '{}'", driver_type.browser_name(), endpoint, session_id);
+                            return Ok(endpoint.clone());
+                        }
+                    }
+                }
+                
+                // Use any available healthy driver (round-robin or first available)
+                let (driver_type, endpoint) = healthy_endpoints.iter().next().unwrap();
+                tracing::info!("Using available {} driver at {} for session '{}'", driver_type.browser_name(), endpoint, session_id);
+                return Ok(endpoint.clone());
+            }
+            
+            // Fall back to reactive startup if no pre-started drivers available
+            if self.config.auto_start_driver {
+                tracing::info!("No pre-started drivers available, falling back to reactive startup for session '{}'", session_id);
 
-            // Try to auto-start the preferred driver or the first available one
-            let endpoint = if let Some(preferred) = &self.config.preferred_driver {
-                self.start_preferred_driver(preferred).await?
+                // Try to auto-start the preferred driver or the first available one
+                let endpoint = if let Some(preferred) = &self.config.preferred_driver {
+                    self.start_preferred_driver(preferred).await?
+                } else {
+                    self.start_any_available_driver().await?
+                };
+
+                tracing::info!("Successfully started WebDriver at {} for session '{}'", endpoint, session_id);
+                Ok(endpoint)
             } else {
-                self.start_any_available_driver().await?
-            };
-
-            tracing::info!("Successfully started WebDriver at: {}", endpoint);
-            Ok(endpoint)
+                Err(anyhow::anyhow!(
+                    "No pre-started WebDriver services available and auto_start_driver is disabled. \
+                     Enable auto_start_driver or manually start a WebDriver service."
+                ).into())
+            }
         } else {
             // Use configured endpoint as-is
             Ok(self.config.webdriver_endpoint.clone())
         }
     }
+
+    /// Extract browser preference from session ID (e.g., "firefox_session1" -> Some(DriverType::Firefox))
+    fn extract_browser_preference_from_session(&self, session_id: &str) -> Option<crate::driver::DriverType> {
+        let session_lower = session_id.to_lowercase();
+        
+        if session_lower.starts_with("firefox") || session_lower.starts_with("gecko") {
+            Some(crate::driver::DriverType::Firefox)
+        } else if session_lower.starts_with("chrome") || session_lower.starts_with("chromium") {
+            Some(crate::driver::DriverType::Chrome)
+        } else if session_lower.starts_with("edge") {
+            Some(crate::driver::DriverType::Edge)
+        } else {
+            None
+        }
+    }
+
 
     async fn start_preferred_driver(&self, preferred: &str) -> Result<String> {
         let endpoint = match preferred.to_lowercase().as_str() {

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
@@ -10,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::{Result, WebDriverError};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DriverType {
     Chrome,
     Firefox,
@@ -18,6 +19,15 @@ pub enum DriverType {
 }
 
 impl DriverType {
+    pub fn from_string(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "chrome" | "chromium" => Some(DriverType::Chrome),
+            "firefox" | "gecko" => Some(DriverType::Firefox),
+            "edge" => Some(DriverType::Edge),
+            _ => None,
+        }
+    }
+
     pub fn executable_name(&self) -> &'static str {
         match self {
             DriverType::Chrome => {
@@ -64,6 +74,8 @@ impl DriverType {
 #[derive(Clone)]
 pub struct DriverManager {
     running_processes: Arc<Mutex<Vec<ManagedProcess>>>,
+    /// Map of driver type to endpoint URL for healthy running drivers
+    healthy_endpoints: Arc<Mutex<HashMap<DriverType, String>>>,
 }
 
 struct ManagedProcess {
@@ -77,7 +89,173 @@ impl DriverManager {
     pub fn new() -> Self {
         Self {
             running_processes: Arc::new(Mutex::new(Vec::new())),
+            healthy_endpoints: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Start multiple WebDriver processes concurrently 
+    pub async fn start_concurrent_drivers(
+        &self,
+        driver_names: &[String],
+        timeout: Duration,
+    ) -> Result<Vec<(DriverType, String)>> {
+        info!("Starting concurrent WebDriver processes: {:?}", driver_names);
+        
+        let mut handles = Vec::new();
+
+        // Start all requested drivers concurrently
+        for driver_name in driver_names {
+            if let Some(driver_type) = DriverType::from_string(driver_name) {
+                let driver_manager = self.clone();
+                let driver_type_clone = driver_type.clone();
+                
+                let handle = tokio::spawn(async move {
+                    let result = driver_manager.start_single_driver(driver_type_clone).await;
+                    (driver_type, result)
+                });
+                handles.push(handle);
+            } else {
+                warn!("Unknown driver type '{}', skipping", driver_name);
+            }
+        }
+
+        // Wait for all drivers to start with timeout
+        let timeout_result = tokio::time::timeout(timeout, async {
+            let mut results = Vec::new();
+            for handle in handles {
+                let (driver_type, result) = handle.await.unwrap_or_else(|e| {
+                    warn!("Driver startup task failed: {}", e);
+                    (DriverType::Chrome, Err(WebDriverError::Session("Task failed".to_string())))
+                });
+
+                match result {
+                    Ok(endpoint) => {
+                        info!(
+                            "Successfully started {} at {}",
+                            driver_type.browser_name(),
+                            endpoint
+                        );
+                        
+                        // Mark as healthy
+                        {
+                            let mut healthy = self.healthy_endpoints.lock().unwrap();
+                            healthy.insert(driver_type.clone(), endpoint.clone());
+                        }
+                        
+                        results.push((driver_type, endpoint));
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to start {}: {}",
+                            driver_type.browser_name(),
+                            e
+                        );
+                    }
+                }
+            }
+            results
+        }).await;
+
+        match timeout_result {
+            Ok(results) => {
+                info!("Concurrent driver startup completed. {} drivers running", results.len());
+                Ok(results)
+            }
+            Err(_) => {
+                warn!("Driver startup timed out after {:?}", timeout);
+                // Return empty vec since we can't access partial results after timeout
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// Start a single WebDriver process
+    async fn start_single_driver(&self, driver_type: DriverType) -> Result<String> {
+        let driver_path = self.find_driver_executable(&driver_type).ok_or_else(|| {
+            WebDriverError::Session(format!(
+                "{} executable not found in PATH",
+                driver_type.executable_name()
+            ))
+        })?;
+
+        let port = driver_type.default_port();
+        let endpoint = format!("http://localhost:{port}");
+
+        // Check if already running on this port
+        if self.is_service_running(port).await {
+            info!("{} already running on port {}", driver_type.browser_name(), port);
+            return Ok(endpoint);
+        }
+
+        info!(
+            "Starting {} on port {}",
+            driver_type.browser_name(),
+            port
+        );
+        
+        self.start_driver(&driver_type, &driver_path, port).await?;
+
+        // Wait for service to be ready
+        self.wait_for_service_ready(&endpoint, Duration::from_secs(10))
+            .await?;
+
+        Ok(endpoint)
+    }
+
+    /// Get all healthy endpoints
+    pub fn get_healthy_endpoints(&self) -> HashMap<DriverType, String> {
+        let healthy = self.healthy_endpoints.lock().unwrap();
+        healthy.clone()
+    }
+
+    /// Check if a specific driver type is healthy
+    pub fn is_driver_healthy(&self, driver_type: &DriverType) -> bool {
+        let healthy = self.healthy_endpoints.lock().unwrap();
+        healthy.contains_key(driver_type)
+    }
+
+    /// Perform health checks on all running drivers and update healthy_endpoints
+    pub async fn refresh_driver_health(&self) -> Result<()> {
+        let mut healthy_endpoints_updated = HashMap::new();
+        
+        // Get current running processes to check their health
+        let processes = {
+            let processes = self.running_processes.lock().unwrap();
+            processes.iter().map(|p| (p.driver_type.clone(), p.port)).collect::<Vec<_>>()
+        };
+
+        for (driver_type, port) in processes {
+            if self.is_service_running(port).await {
+                let endpoint = format!("http://localhost:{}", port);
+                healthy_endpoints_updated.insert(driver_type.clone(), endpoint);
+                debug!("Health check passed for {} on port {}", driver_type.browser_name(), port);
+            } else {
+                warn!("Health check failed for {} on port {}", driver_type.browser_name(), port);
+            }
+        }
+
+        // Update healthy endpoints atomically
+        {
+            let mut healthy = self.healthy_endpoints.lock().unwrap();
+            *healthy = healthy_endpoints_updated;
+        }
+
+        Ok(())
+    }
+
+    /// Start a periodic health check task (returns a handle to cancel it)
+    pub fn start_periodic_health_checks(&self, interval: Duration) -> tokio::task::JoinHandle<()> {
+        let driver_manager = self.clone();
+        
+        tokio::spawn(async move {
+            let mut interval_timer = tokio::time::interval(interval);
+            loop {
+                interval_timer.tick().await;
+                if let Err(e) = driver_manager.refresh_driver_health().await {
+                    warn!("Health check failed: {}", e);
+                }
+            }
+        })
     }
 
     /// Auto-detect available WebDriver executables on the system
@@ -394,6 +572,13 @@ impl DriverManager {
         }
 
         processes.clear();
+        
+        // Clear healthy endpoints
+        {
+            let mut healthy = self.healthy_endpoints.lock().unwrap();
+            healthy.clear();
+        }
+        
         Ok(())
     }
 
@@ -458,6 +643,12 @@ impl DriverManager {
             for &i in indices_to_remove.iter().rev() {
                 processes.remove(i);
             }
+        }
+
+        // Remove from healthy endpoints
+        {
+            let mut healthy = self.healthy_endpoints.lock().unwrap();
+            healthy.remove(driver_type);
         }
 
         Ok(())

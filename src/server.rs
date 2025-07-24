@@ -23,9 +23,45 @@ impl WebDriverServer {
     }
 
     pub fn with_config(config: Config) -> crate::error::Result<Self> {
-        Ok(Self {
-            client_manager: ClientManager::new(config)?,
-        })
+        let server = Self {
+            client_manager: ClientManager::new(config.clone())?,
+        };
+        
+        // Start concurrent webdrivers if auto_start is enabled
+        if config.auto_start_driver && !config.concurrent_drivers.is_empty() {
+            tracing::info!("Starting concurrent webdrivers: {:?}", config.concurrent_drivers);
+            
+            // Spawn the driver startup task
+            let client_manager = server.client_manager.clone();
+            let drivers = config.concurrent_drivers.clone();
+            let timeout = std::time::Duration::from_millis(config.driver_startup_timeout_ms);
+            
+            tokio::spawn(async move {
+                let driver_manager = client_manager.get_driver_manager();
+                match driver_manager.start_concurrent_drivers(&drivers, timeout).await {
+                    Ok(started_drivers) => {
+                        if started_drivers.is_empty() {
+                            tracing::warn!("No webdrivers could be started - server will continue without pre-started drivers");
+                        } else {
+                            tracing::info!("Successfully started {} webdrivers", started_drivers.len());
+                            for (driver_type, endpoint) in started_drivers {
+                                tracing::info!("  {} → {}", driver_type.browser_name(), endpoint);
+                            }
+                            
+                            // Start periodic health checks every 30 seconds
+                            let health_check_interval = std::time::Duration::from_secs(30);
+                            let _health_check_handle = driver_manager.start_periodic_health_checks(health_check_interval);
+                            tracing::info!("Started periodic health checks (every {:?})", health_check_interval);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to start concurrent webdrivers: {} - server will continue with on-demand startup", e);
+                    }
+                }
+            });
+        }
+        
+        Ok(server)
     }
 
     /// Cleanup method to stop any managed driver processes
@@ -1071,13 +1107,13 @@ impl WebDriverServer {
         &self,
         arguments: &Option<Map<String, Value>>,
     ) -> Result<CallToolResult, McpError> {
-        let level = arguments
+        let _level = arguments
             .as_ref()
             .and_then(|args| args.get("level"))
             .and_then(|v| v.as_str())
             .unwrap_or("all");
 
-        let since_timestamp = arguments
+        let _since_timestamp = arguments
             .as_ref()
             .and_then(|args| args.get("since_timestamp"))
             .and_then(|v| v.as_f64());
@@ -1344,6 +1380,65 @@ impl WebDriverServer {
             Ok(success_response(status_lines.join("\n")))
         }
     }
+
+    async fn handle_get_healthy_endpoints(
+        &self,
+        _arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        let healthy_endpoints = self
+            .client_manager
+            .get_driver_manager()
+            .get_healthy_endpoints();
+
+        if healthy_endpoints.is_empty() {
+            Ok(success_response(
+                "No healthy WebDriver endpoints currently available. Try starting drivers or refreshing health status.".to_string(),
+            ))
+        } else {
+            let mut status_lines = vec!["Healthy WebDriver endpoints:".to_string()];
+            for (driver_type, endpoint) in healthy_endpoints {
+                status_lines.push(format!(
+                    "  - {} → {}",
+                    driver_type.browser_name(),
+                    endpoint
+                ));
+            }
+            Ok(success_response(status_lines.join("\n")))
+        }
+    }
+
+    async fn handle_refresh_driver_health(
+        &self,
+        _arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .client_manager
+            .get_driver_manager()
+            .refresh_driver_health()
+            .await
+        {
+            Ok(()) => {
+                let healthy_endpoints = self
+                    .client_manager
+                    .get_driver_manager()
+                    .get_healthy_endpoints();
+
+                let message = if healthy_endpoints.is_empty() {
+                    "Health check completed. No healthy endpoints found.".to_string()
+                } else {
+                    format!(
+                        "Health check completed. {} healthy endpoints found.",
+                        healthy_endpoints.len()
+                    )
+                };
+
+                Ok(success_response(message))
+            }
+            Err(e) => Ok(error_response(format!(
+                "Failed to refresh driver health: {e}"
+            ))),
+        }
+    }
 }
 
 impl ServerHandler for WebDriverServer {
@@ -1407,6 +1502,8 @@ impl ServerHandler for WebDriverServer {
             "stop_driver" => self.handle_stop_driver(&request.arguments).await,
             "stop_all_drivers" => self.handle_stop_all_drivers(&request.arguments).await,
             "list_managed_drivers" => self.handle_list_managed_drivers(&request.arguments).await,
+            "get_healthy_endpoints" => self.handle_get_healthy_endpoints(&request.arguments).await,
+            "refresh_driver_health" => self.handle_refresh_driver_health(&request.arguments).await,
             _ => Err(McpError::method_not_found::<CallToolRequestMethod>()),
         }
     }

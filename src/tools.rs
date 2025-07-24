@@ -36,6 +36,8 @@ impl ToolDefinitions {
             Self::stop_driver_tool(),
             Self::stop_all_drivers_tool(),
             Self::list_managed_drivers_tool(),
+            Self::get_healthy_endpoints_tool(),
+            Self::refresh_driver_health_tool(),
         ]
     }
 
@@ -53,7 +55,7 @@ impl ToolDefinitions {
                         },
                         "session_id": {
                             "type": "string",
-                            "description": "Optional session ID (defaults to 'default')"
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
                         }
                     },
                     "required": ["url"]
@@ -80,7 +82,7 @@ impl ToolDefinitions {
                         },
                         "session_id": {
                             "type": "string",
-                            "description": "Optional session ID (defaults to 'default')"
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
                         }
                     },
                     "required": ["selector"]
@@ -159,7 +161,7 @@ impl ToolDefinitions {
                     "properties": {
                         "session_id": {
                             "type": "string",
-                            "description": "Optional session ID (defaults to 'default')"
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
                         }
                     }
                 })
@@ -185,7 +187,7 @@ impl ToolDefinitions {
                         },
                         "session_id": {
                             "type": "string",
-                            "description": "Optional session ID (defaults to 'default')"
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
                         }
                     },
                     "required": ["selector"]
@@ -212,7 +214,7 @@ impl ToolDefinitions {
                         },
                         "session_id": {
                             "type": "string",
-                            "description": "Optional session ID (defaults to 'default')"
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
                         }
                     },
                     "required": ["script"]
@@ -235,7 +237,7 @@ impl ToolDefinitions {
                     "properties": {
                         "session_id": {
                             "type": "string",
-                            "description": "Optional session ID (defaults to 'default')"
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
                         }
                     }
                 })
@@ -257,7 +259,7 @@ impl ToolDefinitions {
                     "properties": {
                         "session_id": {
                             "type": "string",
-                            "description": "Optional session ID (defaults to 'default')"
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
                         }
                     }
                 })
@@ -279,7 +281,7 @@ impl ToolDefinitions {
                     "properties": {
                         "session_id": {
                             "type": "string",
-                            "description": "Optional session ID (defaults to 'default')"
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
                         }
                     }
                 })
@@ -301,7 +303,7 @@ impl ToolDefinitions {
                     "properties": {
                         "session_id": {
                             "type": "string",
-                            "description": "Optional session ID (defaults to 'default')"
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
                         }
                     }
                 })
@@ -323,7 +325,7 @@ impl ToolDefinitions {
                     "properties": {
                         "session_id": {
                             "type": "string",
-                            "description": "Optional session ID (defaults to 'default')"
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
                         }
                     }
                 })
@@ -345,7 +347,7 @@ impl ToolDefinitions {
                     "properties": {
                         "session_id": {
                             "type": "string",
-                            "description": "Optional session ID (defaults to 'default')"
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
                         },
                         "save_path": {
                             "type": "string",
@@ -381,7 +383,7 @@ impl ToolDefinitions {
                         },
                         "session_id": {
                             "type": "string",
-                            "description": "Optional session ID (defaults to 'default')"
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
                         }
                     },
                     "required": ["selector"]
@@ -434,7 +436,7 @@ impl ToolDefinitions {
                     "properties": {
                         "session_id": {
                             "type": "string",
-                            "description": "Optional session ID (defaults to 'default')"
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
                         }
                     }
                 })
@@ -492,7 +494,7 @@ impl ToolDefinitions {
                         },
                         "session_id": {
                             "type": "string",
-                            "description": "Optional session ID (defaults to 'default')"
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
                         }
                     },
                     "required": ["selector"]
@@ -519,7 +521,7 @@ impl ToolDefinitions {
                         },
                         "session_id": {
                             "type": "string",
-                            "description": "Optional session ID (defaults to 'default')"
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
                         }
                     },
                     "required": ["selector"]
@@ -662,7 +664,7 @@ impl ToolDefinitions {
     fn start_driver_tool() -> Tool {
         Tool {
             name: "start_driver".into(),
-            description: Some("Start a WebDriver process (geckodriver, chromedriver, etc.)".into()),
+            description: Some("Manually start a WebDriver process. Note: The server auto-starts drivers on startup, so this is usually not needed.".into()),
             input_schema: Arc::new(
                 json!({
                     "type": "object",
@@ -729,7 +731,47 @@ impl ToolDefinitions {
         Tool {
             name: "list_managed_drivers".into(),
             description: Some(
-                "List all currently managed WebDriver processes with their status".into(),
+                "List all currently managed WebDriver processes with their status. Shows drivers auto-started by the server.".into(),
+            ),
+            input_schema: Arc::new(
+                json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+            annotations: None,
+        }
+    }
+
+    fn get_healthy_endpoints_tool() -> Tool {
+        Tool {
+            name: "get_healthy_endpoints".into(),
+            description: Some(
+                "Get all healthy WebDriver endpoints available for session creation".into(),
+            ),
+            input_schema: Arc::new(
+                json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+            annotations: None,
+        }
+    }
+
+    fn refresh_driver_health_tool() -> Tool {
+        Tool {
+            name: "refresh_driver_health".into(),
+            description: Some(
+                "Manually refresh the health status of all managed WebDriver endpoints".into(),
             ),
             input_schema: Arc::new(
                 json!({

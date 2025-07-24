@@ -5,7 +5,7 @@ mod error;
 pub mod keycloak;
 pub mod oauth;
 mod server;
-mod tools;
+pub mod tools;
 
 pub use client::ClientManager;
 pub use config::Config;

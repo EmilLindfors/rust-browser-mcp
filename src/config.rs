@@ -7,6 +7,10 @@ pub struct Config {
     pub auto_start_driver: bool,
     pub preferred_driver: Option<String>,
     pub headless: bool,
+    /// List of drivers to start concurrently at server startup
+    pub concurrent_drivers: Vec<String>,
+    /// Timeout for driver startup in milliseconds
+    pub driver_startup_timeout_ms: u64,
 }
 
 impl Config {
@@ -25,6 +29,13 @@ impl Config {
             headless: env::var("WEBDRIVER_HEADLESS")
                 .map(|v| v.to_lowercase() == "true" || v == "1")
                 .unwrap_or(true), // Default to true for headless mode
+            concurrent_drivers: env::var("WEBDRIVER_CONCURRENT_DRIVERS")
+                .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
+                .unwrap_or_else(|_| vec!["firefox".to_string(), "chrome".to_string()]), // Default to both
+            driver_startup_timeout_ms: env::var("WEBDRIVER_STARTUP_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10000), // Default to 10 seconds
         }
     }
 
@@ -42,6 +53,22 @@ impl Config {
 
         if self.default_session_timeout_ms == 0 {
             return Err("WebDriver timeout must be greater than 0".to_string());
+        }
+
+        if self.driver_startup_timeout_ms == 0 {
+            return Err("Driver startup timeout must be greater than 0".to_string());
+        }
+
+        // Validate concurrent drivers list
+        let valid_drivers = ["firefox", "chrome", "edge"];
+        for driver in &self.concurrent_drivers {
+            if !valid_drivers.contains(&driver.to_lowercase().as_str()) {
+                return Err(format!(
+                    "Invalid concurrent driver '{}'. Must be one of: {}",
+                    driver,
+                    valid_drivers.join(", ")
+                ));
+            }
         }
 
         Ok(())
@@ -78,6 +105,8 @@ WebDriver MCP Server Setup:
    - WEBDRIVER_PREFERRED_DRIVER: chrome, firefox, or edge
    - WEBDRIVER_TIMEOUT_MS: Connection timeout in ms (default: 2000)
    - WEBDRIVER_HEADLESS: true (default) or false for GUI mode
+   - WEBDRIVER_CONCURRENT_DRIVERS: comma-separated list (default: firefox,chrome)
+   - WEBDRIVER_STARTUP_TIMEOUT_MS: Driver startup timeout (default: 10000)
 
 3. Manual Setup (if auto-start disabled):
    - Chrome: chromedriver --port=9515

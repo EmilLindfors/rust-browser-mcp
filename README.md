@@ -64,6 +64,8 @@ Browser automation for Claude via the Model Context Protocol (MCP).
    **Or for Claude Code**:
    ```bash
    claude mcp add webdriver -e WEBDRIVER_HEADLESS=true -- /path/to/rust-browser-mcp --browser firefox --transport stdio
+
+   claude mcp add --transport http webdriver http://localhost:8080
    ```
 
 4. **Use with Claude**:
@@ -78,6 +80,26 @@ Browser automation for Claude via the Model Context Protocol (MCP).
 - **Information**: `find_element`, `get_text`, `get_attribute`, `screenshot`
 - **Forms**: `fill_and_submit_form`
 - **Advanced**: `execute_script`
+
+## Features
+
+### 🚀 Proactive WebDriver Architecture
+- **Auto-Start Drivers**: Multiple WebDriver processes (Firefox, Chrome) start automatically when the server boots
+- **Zero Latency**: First tool calls have no startup delay since drivers are pre-started
+- **Smart Session Routing**: Sessions automatically route to the right browser based on session ID prefixes
+- **Health Monitoring**: Periodic health checks ensure drivers stay responsive
+
+### 📱 Multi-Session Support
+- **Concurrent Sessions**: Multiple browser sessions can run simultaneously
+- **Session Isolation**: Each session gets its own browser window/context
+- **Browser Selection**: Use session IDs like `firefox_session1` or `chrome_work` to specify browser preference
+- **Session Reuse**: Sessions persist across multiple tool calls for efficiency
+
+### 🛠️ Management Tools
+- `list_managed_drivers`: View all running WebDriver processes
+- `get_healthy_endpoints`: Check which drivers are healthy and available
+- `refresh_driver_health`: Manually refresh driver health status
+- `start_driver` / `stop_driver`: Manual driver lifecycle control
 
 ## Configuration
 
@@ -102,8 +124,11 @@ Options:
 ### Environment Variables
 
 ```bash
-export WEBDRIVER_PREFERRED_DRIVER="chrome"  # chrome, firefox, edge
-export WEBDRIVER_HEADLESS="true"            # run browser headless
+export WEBDRIVER_PREFERRED_DRIVER="chrome"              # chrome, firefox, edge
+export WEBDRIVER_HEADLESS="true"                        # run browser headless
+export WEBDRIVER_CONCURRENT_DRIVERS="firefox,chrome"    # comma-separated list of drivers to auto-start
+export WEBDRIVER_STARTUP_TIMEOUT_MS="10000"             # driver startup timeout in milliseconds
+export WEBDRIVER_AUTO_START="true"                      # enable auto-start (default: true)
 ```
 
 For Firefox specifically:
