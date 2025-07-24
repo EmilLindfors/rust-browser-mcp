@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use rust_browser_mcp::WebDriverServer;
+use rust_browser_mcp::{Config, WebDriverServer};
 
 mod servers;
 use servers::{run_http_server, run_stdio_server};
@@ -17,6 +17,14 @@ struct Cli {
     /// HTTP server bind address (only used with --transport=http)
     #[arg(long, default_value = "127.0.0.1:8080")]
     bind: String,
+
+    /// Disable OAuth authentication for HTTP server
+    #[arg(long)]
+    no_auth: bool,
+
+    /// Browser driver to use
+    #[arg(short, long, default_value = "chrome")]
+    browser: BrowserType,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -25,6 +33,16 @@ enum TransportMode {
     Stdio,
     /// HTTP streaming server
     Http,
+}
+
+#[derive(Clone, ValueEnum)]
+enum BrowserType {
+    /// Google Chrome browser
+    Chrome,
+    /// Mozilla Firefox browser
+    Firefox,
+    /// Microsoft Edge browser
+    Edge,
 }
 
 #[tokio::main]
@@ -37,7 +55,15 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    let server = WebDriverServer::new().inspect_err(|e| {
+    // Create config with preferred browser
+    let mut config = Config::from_env();
+    config.preferred_driver = Some(match cli.browser {
+        BrowserType::Chrome => "chrome".to_string(),
+        BrowserType::Firefox => "firefox".to_string(),
+        BrowserType::Edge => "edge".to_string(),
+    });
+
+    let server = WebDriverServer::with_config(config).inspect_err(|e| {
         tracing::error!("Failed to create WebDriver server: {}", e);
     })?;
 
@@ -50,7 +76,7 @@ async fn main() -> Result<()> {
         }
         TransportMode::Http => {
             tracing::info!("Starting WebDriver MCP Server on HTTP at {}", cli.bind);
-            run_http_server(server, &cli.bind).await
+            run_http_server(server, &cli.bind, cli.no_auth).await
         }
     }
 }

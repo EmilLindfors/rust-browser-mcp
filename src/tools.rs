@@ -29,6 +29,8 @@ impl ToolDefinitions {
             Self::scroll_to_element_tool(),
             Self::hover_tool(),
             Self::fill_and_submit_form_tool(),
+            Self::login_form_tool(),
+            Self::get_console_logs_tool(),
             // WebDriver lifecycle management tools
             Self::start_driver_tool(),
             Self::stop_driver_tool(),
@@ -336,7 +338,7 @@ impl ToolDefinitions {
     fn screenshot_tool() -> Tool {
         Tool {
             name: "screenshot".into(),
-            description: Some("Take a screenshot of the current page".into()),
+            description: Some("Take a screenshot of the current page and optionally save to disk".into()),
             input_schema: Arc::new(
                 json!({
                     "type": "object",
@@ -344,6 +346,10 @@ impl ToolDefinitions {
                         "session_id": {
                             "type": "string",
                             "description": "Optional session ID (defaults to 'default')"
+                        },
+                        "save_path": {
+                            "type": "string",
+                            "description": "Optional file path to save the screenshot (e.g., '/path/to/screenshot.png')"
                         }
                     }
                 })
@@ -580,6 +586,74 @@ impl ToolDefinitions {
                     }
                 },
                 "required": ["fields", "submit_selector"]
+            }).as_object().unwrap().clone()),
+            annotations: None,
+        }
+    }
+
+    fn login_form_tool() -> Tool {
+        Tool {
+            name: "login_form".into(),
+            description: Some("Automatically fill and submit a login form with username/email and password".into()),
+            input_schema: Arc::new(json!({
+                "type": "object",
+                "properties": {
+                    "username": {
+                        "type": "string",
+                        "description": "Username or email to enter in the login form"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password to enter in the login form"
+                    },
+                    "username_selector": {
+                        "type": "string",
+                        "description": "Optional custom CSS selector for username field (will auto-detect if not provided)"
+                    },
+                    "password_selector": {
+                        "type": "string",
+                        "description": "Optional custom CSS selector for password field (will auto-detect if not provided)"
+                    },
+                    "submit_selector": {
+                        "type": "string",
+                        "description": "Optional custom CSS selector for submit button (will auto-detect if not provided)"
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional session ID (defaults to 'default')"
+                    }
+                },
+                "required": ["username", "password"]
+            }).as_object().unwrap().clone()),
+            annotations: None,
+        }
+    }
+
+    fn get_console_logs_tool() -> Tool {
+        Tool {
+            name: "get_console_logs".into(),
+            description: Some("Capture browser console logs, errors, and warnings for debugging".into()),
+            input_schema: Arc::new(json!({
+                "type": "object", 
+                "properties": {
+                    "level": {
+                        "type": "string",
+                        "enum": ["all", "error", "warn", "info", "debug"],
+                        "description": "Filter logs by level (default: 'all')"
+                    },
+                    "since_timestamp": {
+                        "type": "number",
+                        "description": "Optional: Only return logs since this timestamp (milliseconds)"
+                    },
+                    "wait_timeout": {
+                        "type": "number",
+                        "description": "Wait up to this many seconds before capturing logs to allow JavaScript execution (default: 2.0 seconds)"
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional session ID (defaults to 'default')"
+                    }
+                }
             }).as_object().unwrap().clone()),
             annotations: None,
         }

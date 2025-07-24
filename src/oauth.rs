@@ -5,15 +5,15 @@ use askama::Template;
 use axum::{
     body::Body,
     extract::{Form, Query, State},
-    http::{Request, StatusCode},
+    http::{Request, StatusCode, HeaderMap, header::{SET_COOKIE, COOKIE}},
     middleware::Next,
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Json, Redirect, Response},
     routing::get,
     Router,
 };
 use chrono::Utc;
 use oauth2::TokenResponse;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -199,6 +199,27 @@ pub struct CallbackForm {
     action: String,
 }
 
+/// OAuth 2.0 Authorization Server Metadata (RFC 8414)
+#[derive(Serialize)]
+pub struct AuthorizationServerMetadata {
+    pub issuer: String,
+    pub authorization_endpoint: String,
+    pub token_endpoint: String,
+    pub response_types_supported: Vec<String>,
+    pub grant_types_supported: Vec<String>,
+    pub code_challenge_methods_supported: Vec<String>,
+    pub scopes_supported: Vec<String>,
+}
+
+/// OAuth 2.0 Protected Resource Metadata (RFC 9728)
+#[derive(Serialize)]
+pub struct ProtectedResourceMetadata {
+    pub resource: String,
+    pub authorization_servers: Vec<String>,
+    pub scopes_supported: Vec<String>,
+    pub bearer_methods_supported: Vec<String>,
+}
+
 pub async fn oauth_callback_get(
     Query(query): Query<CallbackQuery>,
     State(store): State<Arc<OAuthStore>>,
@@ -261,10 +282,18 @@ pub async fn oauth_callback_get(
 
                 store.store_token(access_token.token.clone(), access_token.clone()).await;
 
-                return Html(format!(
-                    "<h1>Authorization Successful</h1><p>Access token: {}</p><p>You can now use this token to access the WebDriver MCP server.</p>",
-                    access_token.token
-                )).into_response();
+                // Set HTTP-only cookie with the access token
+                let mut headers = HeaderMap::new();
+                let cookie_value = format!(
+                    "auth_token={}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
+                    access_token.token,
+                    access_token.expires_in.unwrap_or(3600)
+                );
+                headers.insert(SET_COOKIE, cookie_value.parse().unwrap());
+
+                return (headers, Html(format!(
+                    "<h1>Authorization Successful</h1><p>Authentication complete! You can now access protected resources.</p><script>window.location.href='/';</script>"
+                ))).into_response();
             }
             Err(e) => {
                 tracing::error!("Failed to exchange code with Keycloak: {}", e);
@@ -286,10 +315,18 @@ pub async fn oauth_callback_get(
 
     store.store_token(token_id.clone(), access_token.clone()).await;
 
-    Html(format!(
-        "<h1>Authorization Successful (Demo Mode)</h1><p>Access token: {}</p><p>You can now use this token to access the WebDriver MCP server.</p>",
-        access_token.token
-    )).into_response()
+    // Set HTTP-only cookie with the access token
+    let mut headers = HeaderMap::new();
+    let cookie_value = format!(
+        "auth_token={}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
+        access_token.token,
+        access_token.expires_in.unwrap_or(3600)
+    );
+    headers.insert(SET_COOKIE, cookie_value.parse().unwrap());
+
+    (headers, Html(format!(
+        "<h1>Authorization Successful (Demo Mode)</h1><p>Authentication complete! You can now access protected resources.</p><script>window.location.href='/';</script>"
+    ))).into_response()
 }
 
 pub async fn oauth_callback_post(
@@ -320,10 +357,18 @@ pub async fn oauth_callback_post(
 
     store.store_token(token_id.clone(), access_token.clone()).await;
 
-    Html(format!(
-        "<h1>Authorization Successful (Demo Mode)</h1><p>Access token: {}</p><p>You can now use this token to access the WebDriver MCP server.</p>",
-        access_token.token
-    )).into_response()
+    // Set HTTP-only cookie with the access token
+    let mut headers = HeaderMap::new();
+    let cookie_value = format!(
+        "auth_token={}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
+        access_token.token,
+        access_token.expires_in.unwrap_or(3600)
+    );
+    headers.insert(SET_COOKIE, cookie_value.parse().unwrap());
+
+    (headers, Html(format!(
+        "<h1>Authorization Successful (Demo Mode)</h1><p>Authentication complete! You can now access protected resources.</p><script>window.location.href='/';</script>"
+    ))).into_response()
 }
 
 /// Token validation middleware
@@ -332,19 +377,39 @@ pub async fn validate_token_middleware(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    // Extract Authorization header
-    let auth_header = request.headers().get("Authorization");
-    let token = match auth_header {
-        Some(header) => {
-            let header_str = header.to_str().unwrap_or("");
-            if let Some(token) = header_str.strip_prefix("Bearer ") {
-                token.to_string()
-            } else {
-                return (StatusCode::UNAUTHORIZED, "Invalid authorization header").into_response();
-            }
+    // Try to extract token from Authorization header first
+    let token = if let Some(auth_header) = request.headers().get("Authorization") {
+        let header_str = auth_header.to_str().unwrap_or("");
+        if let Some(token) = header_str.strip_prefix("Bearer ") {
+            Some(token.to_string())
+        } else {
+            None
         }
+    } else {
+        None
+    };
+
+    // If no Authorization header, try to extract from cookies
+    let token = token.or_else(|| {
+        request.headers().get(COOKIE)
+            .and_then(|cookie_header| cookie_header.to_str().ok())
+            .and_then(|cookies| {
+                // Parse cookies to find auth_token
+                for cookie in cookies.split(';') {
+                    let cookie = cookie.trim();
+                    if let Some(token) = cookie.strip_prefix("auth_token=") {
+                        return Some(token.to_string());
+                    }
+                }
+                None
+            })
+    });
+
+    // Check if we have a token from either source
+    let token = match token {
+        Some(token) => token,
         None => {
-            return (StatusCode::UNAUTHORIZED, "Missing authorization header").into_response();
+            return (StatusCode::UNAUTHORIZED, "Missing authentication token").into_response();
         }
     };
 
@@ -359,11 +424,61 @@ pub async fn validate_token_middleware(
     }
 }
 
+/// Helper function to extract base URL from request
+fn get_base_url_from_request(request: &Request<Body>) -> String {
+    let scheme = "http"; // TODO: Detect HTTPS
+    let host = request
+        .headers()
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost:8080");
+    format!("{}://{}", scheme, host)
+}
+
+/// OAuth 2.0 Authorization Server Metadata endpoint (RFC 8414)
+pub async fn oauth_server_metadata(
+    State(_store): State<Arc<OAuthStore>>,
+    request: Request<Body>,
+) -> impl IntoResponse {
+    let base_url = get_base_url_from_request(&request);
+    
+    let metadata = AuthorizationServerMetadata {
+        issuer: base_url.clone(),
+        authorization_endpoint: format!("{}/oauth/authorize", base_url),
+        token_endpoint: format!("{}/oauth/callback", base_url), // Using callback as token endpoint for demo
+        response_types_supported: vec!["code".to_string()],
+        grant_types_supported: vec!["authorization_code".to_string()],
+        code_challenge_methods_supported: vec!["S256".to_string()],
+        scopes_supported: vec!["webdriver".to_string(), "openid".to_string()],
+    };
+    
+    Json(metadata)
+}
+
+/// OAuth 2.0 Protected Resource Metadata endpoint (RFC 9728)
+pub async fn protected_resource_metadata(
+    State(_store): State<Arc<OAuthStore>>,
+    request: Request<Body>,
+) -> impl IntoResponse {
+    let base_url = get_base_url_from_request(&request);
+    
+    let metadata = ProtectedResourceMetadata {
+        resource: format!("{}/mcp", base_url),
+        authorization_servers: vec![base_url.clone()],
+        scopes_supported: vec!["webdriver".to_string()],
+        bearer_methods_supported: vec!["header".to_string()],
+    };
+    
+    Json(metadata)
+}
+
 /// Create OAuth router with all endpoints
 pub fn create_oauth_router(store: Arc<OAuthStore>) -> Router {
     Router::new()
         .route("/oauth/authorize", get(oauth_authorize))
         .route("/oauth/callback", get(oauth_callback_get).post(oauth_callback_post))
+        .route("/.well-known/oauth-authorization-server", get(oauth_server_metadata))
+        .route("/.well-known/oauth-protected-resource", get(protected_resource_metadata))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
         .with_state(store)
 }

@@ -2,7 +2,7 @@ mod client;
 mod config;
 mod driver;
 mod error;
-mod keycloak;
+pub mod keycloak;
 pub mod oauth;
 mod server;
 mod tools;

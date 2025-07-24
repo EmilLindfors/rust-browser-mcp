@@ -42,6 +42,7 @@ askama = { version = "0.12" }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4"] }
 url = { version = "2.5" }
+tower = "0.5.2"
 
 [[bin]]
 name = "rust-browser-mcp"

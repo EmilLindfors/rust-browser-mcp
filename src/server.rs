@@ -29,10 +29,19 @@ impl WebDriverServer {
     }
 
     /// Cleanup method to stop any managed driver processes
-    pub fn cleanup(&self) -> crate::error::Result<()> {
-        // Access the driver manager through the client manager would require exposing it
-        // For now, we rely on the Drop implementation of DriverManager
+    pub async fn cleanup(&self) -> crate::error::Result<()> {
         tracing::info!("WebDriver MCP Server shutting down...");
+        
+        // Stop all managed drivers
+        match self.client_manager
+            .get_driver_manager()
+            .stop_all_drivers()
+            .await 
+        {
+            Ok(()) => tracing::info!("Successfully stopped all WebDriver processes"),
+            Err(e) => tracing::warn!("Error stopping WebDriver processes: {}", e),
+        }
+        
         Ok(())
     }
 
@@ -236,18 +245,58 @@ impl WebDriverServer {
         arguments: &Option<Map<String, Value>>,
     ) -> Result<CallToolResult, McpError> {
         let session_id = Self::extract_session_id(arguments);
+        
+        let save_path = arguments
+            .as_ref()
+            .and_then(|args| args.get("save_path"))
+            .and_then(|v| v.as_str());
 
         match self.client_manager.get_or_create_client(session_id).await {
             Ok((_session, client)) => match client.screenshot().await {
                 Ok(png_data) => {
-                    let base64_data = general_purpose::STANDARD.encode(&png_data);
-                    Ok(CallToolResult {
-                        content: vec![Content::image(
-                            format!("data:image/png;base64,{base64_data}"),
-                            "image/png",
-                        )],
-                        is_error: Some(false),
-                    })
+                    // Validate that we have valid PNG data
+                    if png_data.is_empty() {
+                        return Ok(error_response("Screenshot data is empty".to_string()));
+                    }
+
+                    // Check if data starts with PNG signature
+                    if png_data.len() < 4 || &png_data[0..4] != b"\x89PNG" {
+                        return Ok(error_response("Screenshot data is not valid PNG format".to_string()));
+                    }
+
+                    // Save to disk if path is provided
+                    if let Some(path) = save_path {
+                        match std::fs::write(path, &png_data) {
+                            Ok(_) => {
+                                // Also return the image data for display
+                                let base64_data = general_purpose::STANDARD.encode(&png_data);
+                                Ok(CallToolResult {
+                                    content: vec![
+                                        Content::text(format!("Screenshot saved to: {} ({} bytes)", path, png_data.len())),
+                                        Content::image(
+                                            base64_data,
+                                            "image/png",
+                                        )
+                                    ],
+                                    is_error: Some(false),
+                                })
+                            }
+                            Err(e) => Ok(error_response(format!("Failed to save screenshot to {}: {}", path, e))),
+                        }
+                    } else {
+                        // Just return the image data
+                        let base64_data = general_purpose::STANDARD.encode(&png_data);
+                        Ok(CallToolResult {
+                            content: vec![
+                                Content::text(format!("Screenshot taken ({} bytes)", png_data.len())),
+                                Content::image(
+                                    base64_data,
+                                    "image/png",
+                                )
+                            ],
+                            is_error: Some(false),
+                        })
+                    }
                 }
                 Err(e) => Ok(error_response(format!("Failed to take screenshot: {e}"))),
             },
@@ -817,6 +866,339 @@ impl WebDriverServer {
         }
     }
 
+    async fn handle_login_form(
+        &self,
+        arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        let username = arguments
+            .as_ref()
+            .and_then(|args| args.get("username"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_params("username parameter required", None))?;
+
+        let password = arguments
+            .as_ref()
+            .and_then(|args| args.get("password"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_params("password parameter required", None))?;
+
+        // Get optional custom selectors
+        let username_selector = arguments
+            .as_ref()
+            .and_then(|args| args.get("username_selector"))
+            .and_then(|v| v.as_str());
+
+        let password_selector = arguments
+            .as_ref()
+            .and_then(|args| args.get("password_selector"))
+            .and_then(|v| v.as_str());
+
+        let submit_selector = arguments
+            .as_ref()
+            .and_then(|args| args.get("submit_selector"))
+            .and_then(|v| v.as_str());
+
+        let session_id = Self::extract_session_id(arguments);
+
+        match self.client_manager.get_or_create_client(session_id).await {
+            Ok((session, client)) => {
+                // Define common login field selectors to try
+                let default_username_selectors = vec![
+                    "input[type='email']",
+                    "input[type='text'][name*='user']",
+                    "input[type='text'][name*='email']",
+                    "input[name='username']",
+                    "input[name='email']",
+                    "input[id*='user']",
+                    "input[id*='email']",
+                    "#username",
+                    "#email",
+                    "[placeholder*='email' i]",
+                    "[placeholder*='username' i]",
+                ];
+
+                let default_password_selectors = vec![
+                    "input[type='password']",
+                    "input[name='password']",
+                    "#password",
+                    "[placeholder*='password' i]",
+                ];
+
+                let default_submit_selectors = vec![
+                    "button[type='submit']",
+                    "input[type='submit']",
+                    "button:contains('Sign in')",
+                    "button:contains('Login')",
+                    "button:contains('Log in')",
+                    "[role='button']:contains('Sign in')",
+                    "[role='button']:contains('Login')",
+                    "button",
+                ];
+
+                // Try to find and fill username field
+                let username_found = if let Some(selector) = username_selector {
+                    // Use custom selector
+                    match client.find(Locator::Css(selector)).await {
+                        Ok(element) => {
+                            if let Err(e) = element.clear().await {
+                                return Ok(error_response(format!(
+                                    "Failed to clear username field '{selector}': {e}"
+                                )));
+                            }
+                            if let Err(e) = element.send_keys(username).await {
+                                return Ok(error_response(format!(
+                                    "Failed to fill username field '{selector}': {e}"
+                                )));
+                            }
+                            true
+                        }
+                        Err(e) => {
+                            return Ok(error_response(format!(
+                                "Failed to find username field with custom selector '{selector}': {e}"
+                            )));
+                        }
+                    }
+                } else {
+                    // Try default selectors
+                    let mut found = false;
+                    for selector in &default_username_selectors {
+                        if let Ok(element) = client.find(Locator::Css(selector)).await {
+                            if element.clear().await.is_ok() && element.send_keys(username).await.is_ok() {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    found
+                };
+
+                if !username_found {
+                    return Ok(error_response(
+                        "Could not find username/email field. Try providing a custom username_selector".to_string()
+                    ));
+                }
+
+                // Try to find and fill password field
+                let password_found = if let Some(selector) = password_selector {
+                    // Use custom selector
+                    match client.find(Locator::Css(selector)).await {
+                        Ok(element) => {
+                            if let Err(e) = element.clear().await {
+                                return Ok(error_response(format!(
+                                    "Failed to clear password field '{selector}': {e}"
+                                )));
+                            }
+                            if let Err(e) = element.send_keys(password).await {
+                                return Ok(error_response(format!(
+                                    "Failed to fill password field '{selector}': {e}"
+                                )));
+                            }
+                            true
+                        }
+                        Err(e) => {
+                            return Ok(error_response(format!(
+                                "Failed to find password field with custom selector '{selector}': {e}"
+                            )));
+                        }
+                    }
+                } else {
+                    // Try default selectors
+                    let mut found = false;
+                    for selector in &default_password_selectors {
+                        if let Ok(element) = client.find(Locator::Css(selector)).await {
+                            if element.clear().await.is_ok() && element.send_keys(password).await.is_ok() {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    found
+                };
+
+                if !password_found {
+                    return Ok(error_response(
+                        "Could not find password field. Try providing a custom password_selector".to_string()
+                    ));
+                }
+
+                // Try to find and click submit button
+                if let Some(selector) = submit_selector {
+                    // Use custom selector
+                    match client.find(Locator::Css(selector)).await {
+                        Ok(element) => match element.click().await {
+                            Ok(_) => Ok(success_response(format!(
+                                "Successfully filled login form and submitted (session: {})",
+                                session
+                            ))),
+                            Err(e) => Ok(error_response(format!(
+                                "Login form filled but failed to click submit button. Error: {e}"
+                            ))),
+                        },
+                        Err(e) => Ok(error_response(format!(
+                            "Failed to find submit button with custom selector '{selector}': {e}"
+                        ))),
+                    }
+                } else {
+                    // Try default selectors
+                    let mut submit_clicked = false;
+                    for selector in &default_submit_selectors {
+                        if let Ok(element) = client.find(Locator::Css(selector)).await {
+                            if element.click().await.is_ok() {
+                                submit_clicked = true;
+                                break;
+                            }
+                        }
+                    }
+                    if submit_clicked {
+                        Ok(success_response(format!(
+                            "Successfully filled login form and submitted (session: {})",
+                            session
+                        )))
+                    } else {
+                        Ok(error_response(
+                            "Could not find submit button. Try providing a custom submit_selector".to_string()
+                        ))
+                    }
+                }
+            }
+            Err(e) => Ok(error_response(format!(
+                "Failed to create webdriver client: {e}"
+            ))),
+        }
+    }
+
+    async fn handle_get_console_logs(
+        &self,
+        arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        let level = arguments
+            .as_ref()
+            .and_then(|args| args.get("level"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("all");
+
+        let since_timestamp = arguments
+            .as_ref()
+            .and_then(|args| args.get("since_timestamp"))
+            .and_then(|v| v.as_f64());
+
+        let wait_timeout = arguments
+            .as_ref()
+            .and_then(|args| args.get("wait_timeout"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(2.0); // Default to 2 seconds
+
+        let session_id = Self::extract_session_id(arguments);
+
+        match self.client_manager.get_or_create_client(session_id).await {
+            Ok((session, client)) => {
+                // Wait for JavaScript execution to complete before capturing logs
+                if wait_timeout > 0.0 {
+                    tokio::time::sleep(std::time::Duration::from_secs_f64(wait_timeout)).await;
+                }
+
+                // JavaScript to capture console logs - simple working version
+                let console_script = r#"
+                    try {
+                        if (!window.__mcpConsoleLogs) {
+                            window.__mcpConsoleLogs = [];
+                            
+                            const originalConsole = {
+                                log: console.log,
+                                error: console.error,
+                                warn: console.warn,
+                                info: console.info,
+                                debug: console.debug
+                            };
+                            
+                            ['log', 'error', 'warn', 'info', 'debug'].forEach(level => {
+                                console[level] = function(...args) {
+                                    originalConsole[level].apply(console, args);
+                                    window.__mcpConsoleLogs.push({
+                                        level: level,
+                                        message: args.map(arg => {
+                                            if (typeof arg === 'object') {
+                                                try {
+                                                    return JSON.stringify(arg, null, 2);
+                                                } catch (e) {
+                                                    return String(arg);
+                                                }
+                                            }
+                                            return String(arg);
+                                        }).join(' '),
+                                        timestamp: Date.now(),
+                                        url: window.location.href
+                                    });
+                                };
+                            });
+                            
+                            window.onerror = function(message, source, lineno, colno, error) {
+                                window.__mcpConsoleLogs.push({
+                                    level: 'error',
+                                    message: message + ' at ' + source + ':' + lineno + ':' + colno,
+                                    timestamp: Date.now(),
+                                    url: window.location.href,
+                                    stack: error ? error.stack : null
+                                });
+                                return false;
+                            };
+                            
+                            window.addEventListener('unhandledrejection', function(event) {
+                                window.__mcpConsoleLogs.push({
+                                    level: 'error',
+                                    message: 'Unhandled Promise Rejection: ' + event.reason,
+                                    timestamp: Date.now(),
+                                    url: window.location.href
+                                });
+                            });
+                        }
+                        
+                        return window.__mcpConsoleLogs || [];
+                        
+                    } catch (e) {
+                        return 'Error: ' + e.message;
+                    }
+                "#;
+
+                match client.execute(&console_script, vec![]).await {
+                    Ok(result) => {
+                        // Parse the JavaScript result
+                        let logs_str = format!("{:?}", result);
+                        
+                        // Also try to get any existing console entries via Performance API
+                        let performance_script = r#"
+                            // Try to get performance entries that might indicate errors
+                            const perfEntries = performance.getEntriesByType('navigation');
+                            const resourceEntries = performance.getEntriesByType('resource');
+                            
+                            const errorResources = resourceEntries.filter(entry => 
+                                entry.name.includes('.js') && 
+                                (entry.transferSize === 0 || entry.duration > 5000)
+                            );
+                            
+                            return {
+                                navigation: perfEntries.length > 0 ? perfEntries[0] : null,
+                                slowOrFailedResources: errorResources.slice(0, 10)
+                            };
+                        "#;
+                        
+                        let perf_result = client.execute(performance_script, vec![]).await
+                            .unwrap_or_else(|_| serde_json::Value::Null);
+
+                        Ok(success_response(format!(
+                            "Console logs captured (session: {}):\n\n--- Console Messages ---\n{}\n\n--- Performance Info ---\n{:?}",
+                            session, logs_str, perf_result
+                        )))
+                    }
+                    Err(e) => Ok(error_response(format!("Failed to capture console logs: {e}"))),
+                }
+            }
+            Err(e) => Ok(error_response(format!(
+                "Failed to create webdriver client: {e}"
+            ))),
+        }
+    }
+
     // WebDriver lifecycle management handlers
 
     async fn handle_start_driver(
@@ -965,6 +1347,21 @@ impl WebDriverServer {
 }
 
 impl ServerHandler for WebDriverServer {
+    fn get_info(&self) -> InitializeResult {
+        InitializeResult {
+            protocol_version: ProtocolVersion::V_2024_11_05,
+            server_info: Implementation {
+                name: "rust-browser-mcp".to_string(),
+                version: "0.1.0".to_string(),
+            },
+            capabilities: ServerCapabilities {
+                tools: Some(ToolsCapability::default()),
+                ..Default::default()
+            },
+            instructions: Some("WebDriver MCP Server - Browser automation for Claude".to_string()),
+        }
+    }
+
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParam>,
@@ -1003,6 +1400,8 @@ impl ServerHandler for WebDriverServer {
             "scroll_to_element" => self.handle_scroll_to_element(&request.arguments).await,
             "hover" => self.handle_hover(&request.arguments).await,
             "fill_and_submit_form" => self.handle_fill_and_submit_form(&request.arguments).await,
+            "login_form" => self.handle_login_form(&request.arguments).await,
+            "get_console_logs" => self.handle_get_console_logs(&request.arguments).await,
             // WebDriver lifecycle management
             "start_driver" => self.handle_start_driver(&request.arguments).await,
             "stop_driver" => self.handle_stop_driver(&request.arguments).await,

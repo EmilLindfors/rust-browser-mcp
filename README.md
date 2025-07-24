@@ -52,14 +52,18 @@ Browser automation for Claude via the Model Context Protocol (MCP).
      "mcpServers": {
        "webdriver": {
          "command": "/path/to/rust-browser-mcp",
-         "args": ["--transport", "stdio"],
+         "args": ["--browser", "chrome", "--transport", "stdio"],
          "env": {
-           "WEBDRIVER_PREFERRED_DRIVER": "chrome",
            "WEBDRIVER_HEADLESS": "true"
          }
        }
      }
    }
+   ```
+   
+   **Or for Claude Code**:
+   ```bash
+   claude mcp add webdriver -e WEBDRIVER_HEADLESS=true -- /path/to/rust-browser-mcp --browser firefox --transport stdio
    ```
 
 4. **Use with Claude**:
@@ -77,7 +81,26 @@ Browser automation for Claude via the Model Context Protocol (MCP).
 
 ## Configuration
 
-Environment variables:
+### Command Line Options
+
+```bash
+# Specify browser driver
+rust-browser-mcp --browser firefox --transport stdio
+rust-browser-mcp --browser chrome --transport stdio
+rust-browser-mcp --browser edge --transport stdio
+
+# HTTP mode
+rust-browser-mcp --transport http --bind 0.0.0.0:8080 --browser firefox
+```
+
+Options:
+- `--browser, -b`: Browser driver to use (chrome, firefox, edge) - defaults to chrome
+- `--transport, -t`: Server transport mode (stdio, http) - defaults to stdio
+- `--bind`: HTTP server bind address (only used with --transport=http) - defaults to 127.0.0.1:8080
+- `--no-auth`: Disable OAuth authentication for HTTP server
+
+### Environment Variables
+
 ```bash
 export WEBDRIVER_PREFERRED_DRIVER="chrome"  # chrome, firefox, edge
 export WEBDRIVER_HEADLESS="true"            # run browser headless
@@ -103,5 +126,9 @@ For Firefox specifically:
 
 For remote access:
 ```bash
+# Default Chrome
 cargo run -- --transport http --bind 0.0.0.0:8080
+
+# With Firefox
+cargo run -- --browser firefox --transport http --bind 0.0.0.0:8080
 ```

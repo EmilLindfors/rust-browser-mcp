@@ -1,23 +1,23 @@
 use anyhow::Result;
 use axum::{
+    Json, Router,
     body::Body,
     extract::{Form, Query, State},
     http::{Request, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
+use rust_browser_mcp::{WebDriverServer, oauth::AccessToken};
 use serde::Deserialize;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
-use webdriver_mcp::{WebDriverServer, oauth::AccessToken};
 
 /// Demo OAuth server showing OAuth integration with WebDriver MCP
 /// This example runs in demo mode (no Keycloak required)
-const BIND_ADDRESS: &str = "127.0.0.1:3000";
+const BIND_ADDRESS: &str = "127.0.0.1:8080";
 
 /// Simple in-memory session store for demo
 #[derive(Clone)]
@@ -216,10 +216,10 @@ async fn oauth_authorize(
     State(store): State<Arc<DemoOAuthStore>>,
 ) -> impl IntoResponse {
     let state = query.state.unwrap_or_else(|| Uuid::new_v4().to_string());
-    
+
     // Store session
     store.create_session(state.clone()).await;
-    
+
     // Return authorization page with state
     let html = AUTHORIZE_HTML.replace("{STATE}", &state);
     Html(html)
@@ -238,22 +238,28 @@ async fn oauth_callback(
 ) -> impl IntoResponse {
     // Validate session
     if !store.validate_session(&form.state).await {
-        return Html(r#"
+        return Html(
+            r#"
         <h1>❌ Invalid Session</h1>
         <p>The authorization session has expired or is invalid.</p>
         <a href="/oauth/authorize">Try again</a>
-        "#).into_response();
+        "#,
+        )
+        .into_response();
     }
 
     // Clean up session
     store.remove_session(&form.state).await;
 
     if form.action != "authorize" {
-        return Html(r#"
+        return Html(
+            r#"
         <h1>🚫 Access Denied</h1>
         <p>Authorization was denied by the user.</p>
         <a href="/oauth/authorize">Try again</a>
-        "#).into_response();
+        "#,
+        )
+        .into_response();
     }
 
     // Create access token
@@ -270,7 +276,8 @@ async fn oauth_callback(
     store.store_token(token.clone()).await;
 
     // Return success page with token
-    Html(format!(r#"
+    Html(format!(
+        r#"
     <!DOCTYPE html>
     <html>
     <head>
@@ -368,7 +375,10 @@ async fn oauth_callback(
         </div>
     </body>
     </html>
-    "#, token.token, token.token, token.token)).into_response()
+    "#,
+        token.token, token.token, token.token
+    ))
+    .into_response()
 }
 
 /// Token validation middleware
@@ -385,11 +395,19 @@ async fn validate_token_middleware(
             if let Some(token) = header_str.strip_prefix("Bearer ") {
                 token.to_string()
             } else {
-                return (StatusCode::UNAUTHORIZED, "Invalid authorization header format. Use: Authorization: Bearer <token>").into_response();
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    "Invalid authorization header format. Use: Authorization: Bearer <token>",
+                )
+                    .into_response();
             }
         }
         None => {
-            return (StatusCode::UNAUTHORIZED, "Missing Authorization header. Include: Authorization: Bearer <token>").into_response();
+            return (
+                StatusCode::UNAUTHORIZED,
+                "Missing Authorization header. Include: Authorization: Bearer <token>",
+            )
+                .into_response();
         }
     };
 
@@ -406,7 +424,8 @@ async fn validate_token_middleware(
 
 /// Landing page
 async fn index() -> Html<&'static str> {
-    Html(r#"
+    Html(
+        r#"
     <!DOCTYPE html>
     <html>
     <head>
@@ -510,7 +529,8 @@ curl -H "Authorization: Bearer YOUR_TOKEN" \\
         </div>
     </body>
     </html>
-    "#)
+    "#,
+    )
 }
 
 /// Health check endpoint
@@ -528,8 +548,7 @@ async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into())
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -541,12 +560,17 @@ async fn main() -> Result<()> {
     // Create WebDriver MCP server
     let webdriver_server = WebDriverServer::new()
         .map_err(|e| anyhow::anyhow!("Failed to create WebDriver server: {}", e))?;
+    
+    // Create a clone for cleanup before moving into closure
+    let webdriver_server_for_cleanup = webdriver_server.clone();
 
     // Create demo OAuth store
     let oauth_store = Arc::new(DemoOAuthStore::new());
 
     // Create MCP service - this handles the actual WebDriver functionality
-    use rmcp::transport::streamable_http_server::{StreamableHttpService, session::local::LocalSessionManager};
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpService, session::local::LocalSessionManager,
+    };
     let mcp_service = StreamableHttpService::new(
         move || Ok(webdriver_server.clone()),
         LocalSessionManager::default().into(),
@@ -554,12 +578,13 @@ async fn main() -> Result<()> {
     );
 
     // Create protected MCP routes (require OAuth token)
-    let protected_mcp = Router::new()
-        .nest_service("/mcp", mcp_service)
-        .layer(middleware::from_fn_with_state(
-            oauth_store.clone(),
-            validate_token_middleware,
-        ));
+    let protected_mcp =
+        Router::new()
+            .nest_service("/mcp", mcp_service)
+            .layer(middleware::from_fn_with_state(
+                oauth_store.clone(),
+                validate_token_middleware,
+            ));
 
     // Create OAuth routes
     let oauth_routes = Router::new()
@@ -578,17 +603,22 @@ async fn main() -> Result<()> {
     // Start server
     let addr = BIND_ADDRESS.parse::<SocketAddr>()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    
+
     println!("\n✅ Server started successfully!");
     println!("👉 Visit http://{BIND_ADDRESS} to get started");
     println!("⏹️  Press Ctrl+C to stop\n");
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             tokio::signal::ctrl_c()
                 .await
                 .expect("Failed to install Ctrl+C handler");
             println!("\n🛑 Shutting down server...");
+            
+            // Cleanup WebDriver processes before shutdown
+            if let Err(e) = webdriver_server_for_cleanup.cleanup().await {
+                println!("⚠️  Warning: Error during WebDriver cleanup: {}", e);
+            }
         })
         .await?;
 
