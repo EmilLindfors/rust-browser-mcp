@@ -2,4 +2,4 @@
 geckodriver
 rust-sdk
 fantoccini
-recipes
+recipes/*
