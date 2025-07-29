@@ -1,25 +1,12 @@
 use std::sync::Arc;
-
-use rmcp::model::{Content, Tool};
+use rmcp::model::Tool;
 use serde_json::json;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServerMode {
-    Stdio,  // Client controls driver lifecycle
-    Http,   // Server manages driver lifecycle automatically
-}
+pub struct AutomationTools;
 
-pub struct ToolDefinitions;
-
-impl ToolDefinitions {
-    pub fn list_all() -> Vec<Tool> {
-        // Default to stdio mode for backward compatibility
-        Self::list_for_mode(ServerMode::Stdio)
-    }
-
-    pub fn list_for_mode(mode: ServerMode) -> Vec<Tool> {
-        let mut tools = vec![
-            // Core browser automation tools (available in both modes)
+impl AutomationTools {
+    pub fn get_tools() -> Vec<Tool> {
+        vec![
             Self::navigation_tool(),
             Self::find_element_tool(),
             Self::click_tool(),
@@ -33,7 +20,10 @@ impl ToolDefinitions {
             Self::refresh_tool(),
             Self::get_page_load_status_tool(),
             Self::screenshot_tool(),
+            Self::resize_window_tool(),
             Self::wait_for_element_tool(),
+            Self::wait_for_condition_tool(),
+            Self::get_element_info_tool(),
             Self::get_element_attribute_tool(),
             Self::get_page_source_tool(),
             Self::get_element_property_tool(),
@@ -42,26 +32,7 @@ impl ToolDefinitions {
             Self::hover_tool(),
             Self::fill_and_submit_form_tool(),
             Self::login_form_tool(),
-            Self::get_console_logs_tool(),
-            Self::get_performance_metrics_tool(),
-            Self::monitor_memory_usage_tool(),
-            Self::run_performance_test_tool(),
-            Self::monitor_resource_usage_tool(),
-        ];
-
-        // Add driver lifecycle tools only in stdio mode
-        if mode == ServerMode::Stdio {
-            tools.extend(vec![
-                Self::get_healthy_endpoints_tool(),
-                Self::refresh_driver_health_tool(),
-                Self::list_managed_drivers_tool(),
-                Self::start_driver_tool(),
-                Self::stop_driver_tool(),
-                Self::stop_all_drivers_tool(),
-            ]);
-        }
-
-        tools
+        ]
     }
 
     fn navigation_tool() -> Tool {
@@ -94,14 +65,22 @@ impl ToolDefinitions {
     fn find_element_tool() -> Tool {
         Tool {
             name: "find_element".into(),
-            description: Some("Find an element by CSS selector".into()),
+            description: Some("Find an element by CSS selector, optionally scoped within a parent element. This tool is ideal for finding nested elements in complex structures like charts, forms, or components without requiring complex CSS selectors.".into()),
             input_schema: Arc::new(
                 json!({
                     "type": "object",
                     "properties": {
                         "selector": {
                             "type": "string",
-                            "description": "CSS selector to find element"
+                            "description": "CSS selector to find element (e.g., '.button', '#myId', '[data-test=\"item\"]')"
+                        },
+                        "parent_selector": {
+                            "type": "string",
+                            "description": "Optional CSS selector for parent container to search within. When provided, the search will be limited to descendants of the matching parent element. Useful for scoped searches like finding '.legend-item' within '.chart-container' or '.error-message' within '.form-section'."
+                        },
+                        "wait_timeout": {
+                            "type": "number",
+                            "description": "Wait up to this many seconds for element to appear (default: 0 = no wait). Applies to both parent and child elements."
                         },
                         "session_id": {
                             "type": "string",
@@ -386,6 +365,37 @@ impl ToolDefinitions {
         }
     }
 
+    fn resize_window_tool() -> Tool {
+        Tool {
+            name: "resize_window".into(),
+            description: Some("Resize the browser window to specific width and height dimensions".into()),
+            input_schema: Arc::new(
+                json!({
+                    "type": "object",
+                    "required": ["width", "height"],
+                    "properties": {
+                        "width": {
+                            "type": "number",
+                            "description": "Window width in pixels"
+                        },
+                        "height": {
+                            "type": "number",
+                            "description": "Window height in pixels"
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
+                        }
+                    }
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+            annotations: None,
+        }
+    }
+
     fn wait_for_element_tool() -> Tool {
         Tool {
             name: "wait_for_element".into(),
@@ -415,6 +425,73 @@ impl ToolDefinitions {
                 .unwrap()
                 .clone(),
             ),
+            annotations: None,
+        }
+    }
+
+    fn wait_for_condition_tool() -> Tool {
+        Tool {
+            name: "wait_for_condition".into(),
+            description: Some(
+                "Wait for a JavaScript condition to become true with configurable timeout".into(),
+            ),
+            input_schema: Arc::new(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "condition": {
+                            "type": "string",
+                            "description": "JavaScript expression that should evaluate to true (e.g., 'document.readyState === \"complete\"', 'window.myChart && window.myChart.isReady()')"
+                        },
+                        "timeout_seconds": {
+                            "type": "number",
+                            "description": "Maximum time to wait in seconds (default: 10)"
+                        },
+                        "check_interval_ms": {
+                            "type": "number",
+                            "description": "How often to check the condition in milliseconds (default: 100)"
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Optional session ID (defaults to 'default'). Use 'firefox_*' or 'chrome_*' prefixes to specify browser preference."
+                        }
+                    },
+                    "required": ["condition"]
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+            annotations: None,
+        }
+    }
+
+    fn get_element_info_tool() -> Tool {
+        Tool {
+            name: "get_element_info".into(),
+            description: Some("Get comprehensive information about an element including visibility, size, position, and styling".into()),
+            input_schema: Arc::new(json!({
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector of element to inspect"
+                    },
+                    "include_computed_styles": {
+                        "type": "boolean",
+                        "description": "Include computed CSS styles (default: false)"
+                    },
+                    "wait_timeout": {
+                        "type": "number",
+                        "description": "Wait up to this many seconds for element to appear (default: 0 = no wait)"
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional session ID (defaults to 'default')"
+                    }
+                },
+                "required": ["selector"]
+            }).as_object().unwrap().clone()),
             annotations: None,
         }
     }
@@ -505,7 +582,7 @@ impl ToolDefinitions {
         Tool {
             name: "find_elements".into(),
             description: Some(
-                "Find all elements matching a CSS selector and get basic info about each".into(),
+                "Find all elements matching a CSS selector, optionally scoped within a parent element. Returns basic info about each element found. Perfect for finding multiple items like chart data points, form fields, list items, or menu options within a specific container.".into(),
             ),
             input_schema: Arc::new(
                 json!({
@@ -513,7 +590,15 @@ impl ToolDefinitions {
                     "properties": {
                         "selector": {
                             "type": "string",
-                            "description": "CSS selector to find elements"
+                            "description": "CSS selector to find elements (e.g., '.data-point', 'li', '[role=\"menuitem\"]')"
+                        },
+                        "parent_selector": {
+                            "type": "string",
+                            "description": "Optional CSS selector for parent container to search within. When provided, only elements within the matching parent will be found. Excellent for scoped searches like finding all '.tooltip-item' elements within '.active-tooltip' or all '.legend-entry' within '.chart-legend'."
+                        },
+                        "wait_timeout": {
+                            "type": "number",
+                            "description": "Wait up to this many seconds for parent element to appear (default: 0 = no wait). Child elements are found immediately once parent is located."
                         },
                         "session_id": {
                             "type": "string",
@@ -652,288 +737,5 @@ impl ToolDefinitions {
             }).as_object().unwrap().clone()),
             annotations: None,
         }
-    }
-
-    fn get_console_logs_tool() -> Tool {
-        Tool {
-            name: "get_console_logs".into(),
-            description: Some("Capture browser console logs, errors, and warnings for debugging".into()),
-            input_schema: Arc::new(json!({
-                "type": "object", 
-                "properties": {
-                    "level": {
-                        "type": "string",
-                        "enum": ["all", "error", "warn", "info", "debug"],
-                        "description": "Filter logs by level (default: 'all')"
-                    },
-                    "since_timestamp": {
-                        "type": "number",
-                        "description": "Optional: Only return logs since this timestamp (milliseconds)"
-                    },
-                    "wait_timeout": {
-                        "type": "number",
-                        "description": "Wait up to this many seconds before capturing logs to allow JavaScript execution (default: 2.0 seconds)"
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "Optional session ID (defaults to 'default')"
-                    }
-                }
-            }).as_object().unwrap().clone()),
-            annotations: None,
-        }
-    }
-
-    fn get_performance_metrics_tool() -> Tool {
-        Tool {
-            name: "get_performance_metrics".into(),
-            description: Some("Get comprehensive performance metrics including timing, navigation, and resource loading data".into()),
-            input_schema: Arc::new(json!({
-                "type": "object",
-                "properties": {
-                    "include_resources": {
-                        "type": "boolean",
-                        "description": "Include resource timing data (default: true)"
-                    },
-                    "include_navigation": {
-                        "type": "boolean", 
-                        "description": "Include navigation timing data (default: true)"
-                    },
-                    "include_paint": {
-                        "type": "boolean",
-                        "description": "Include paint timing data (default: true)"
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "Optional session ID (defaults to 'default')"
-                    }
-                }
-            }).as_object().unwrap().clone()),
-            annotations: None,
-        }
-    }
-
-    fn monitor_memory_usage_tool() -> Tool {
-        Tool {
-            name: "monitor_memory_usage".into(),
-            description: Some("Monitor JavaScript heap memory usage and detect potential memory leaks".into()),
-            input_schema: Arc::new(json!({
-                "type": "object",
-                "properties": {
-                    "duration_seconds": {
-                        "type": "number",
-                        "description": "Duration to monitor in seconds (default: 10)"
-                    },
-                    "interval_ms": {
-                        "type": "number",
-                        "description": "Sampling interval in milliseconds (default: 1000)"
-                    },
-                    "include_gc_info": {
-                        "type": "boolean",
-                        "description": "Include garbage collection information if available (default: true)"
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "Optional session ID (defaults to 'default')"
-                    }
-                }
-            }).as_object().unwrap().clone()),
-            annotations: None,
-        }
-    }
-
-    fn run_performance_test_tool() -> Tool {
-        Tool {
-            name: "run_performance_test".into(),
-            description: Some("Run automated performance test with user interactions and collect comprehensive metrics".into()),
-            input_schema: Arc::new(json!({
-                "type": "object",
-                "properties": {
-                    "test_actions": {
-                        "type": "array",
-                        "description": "Array of actions to perform during test",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "type": {
-                                    "type": "string",
-                                    "enum": ["click", "scroll", "wait", "navigate"],
-                                    "description": "Type of action to perform"
-                                },
-                                "selector": {
-                                    "type": "string",
-                                    "description": "CSS selector for click/scroll actions"
-                                },
-                                "url": {
-                                    "type": "string", 
-                                    "description": "URL for navigate actions"
-                                },
-                                "duration_ms": {
-                                    "type": "number",
-                                    "description": "Duration for wait actions in milliseconds"
-                                }
-                            },
-                            "required": ["type"]
-                        }
-                    },
-                    "iterations": {
-                        "type": "number",
-                        "description": "Number of test iterations (default: 1)"
-                    },
-                    "collect_screenshots": {
-                        "type": "boolean",
-                        "description": "Take screenshots during test (default: false)"
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "Optional session ID (defaults to 'default')"
-                    }
-                },
-                "required": ["test_actions"]
-            }).as_object().unwrap().clone()),
-            annotations: None,
-        }
-    }
-
-    fn monitor_resource_usage_tool() -> Tool {
-        Tool {
-            name: "monitor_resource_usage".into(),
-            description: Some("Monitor network requests, CPU usage, and rendering performance metrics".into()),
-            input_schema: Arc::new(json!({
-                "type": "object",
-                "properties": {
-                    "duration_seconds": {
-                        "type": "number",
-                        "description": "Duration to monitor in seconds (default: 30)"
-                    },
-                    "include_network": {
-                        "type": "boolean",
-                        "description": "Monitor network requests (default: true)"
-                    },
-                    "include_cpu": {
-                        "type": "boolean",
-                        "description": "Monitor CPU usage if available (default: true)"
-                    },
-                    "include_fps": {
-                        "type": "boolean",
-                        "description": "Monitor frame rate performance (default: true)"
-                    },
-                    "network_filter": {
-                        "type": "string",
-                        "description": "Filter network requests by URL pattern (regex)"
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "Optional session ID (defaults to 'default')"
-                    }
-                }
-            }).as_object().unwrap().clone()),
-            annotations: None,
-        }
-    }
-
-    fn get_healthy_endpoints_tool() -> Tool {
-        Tool {
-            name: "get_healthy_endpoints".into(),
-            description: Some("Get list of healthy WebDriver endpoints".into()),
-            input_schema: Arc::new(
-                json!({
-                    "type": "object",
-                    "properties": {}
-                }).as_object().unwrap().clone()),
-            annotations: None,
-        }
-    }
-
-    fn refresh_driver_health_tool() -> Tool {
-        Tool {
-            name: "refresh_driver_health".into(),
-            description: Some("Refresh health status of all WebDriver endpoints".into()),
-            input_schema: Arc::new(
-                json!({
-                    "type": "object",
-                    "properties": {}
-                }).as_object().unwrap().clone()),
-            annotations: None,
-        }
-    }
-
-    fn list_managed_drivers_tool() -> Tool {
-        Tool {
-            name: "list_managed_drivers".into(),
-            description: Some("List all managed WebDriver processes and their status".into()),
-            input_schema: Arc::new(
-                json!({
-                    "type": "object",
-                    "properties": {}
-                }).as_object().unwrap().clone()),
-            annotations: None,
-        }
-    }
-
-    fn start_driver_tool() -> Tool {
-        Tool {
-            name: "start_driver".into(),
-            description: Some("Start a specific WebDriver process".into()),
-            input_schema: Arc::new(
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "driver_type": {
-                            "type": "string",
-                            "description": "Type of driver to start (chrome, firefox, edge)"
-                        }
-                    },
-                    "required": ["driver_type"]
-                }).as_object().unwrap().clone()),
-            annotations: None,
-        }
-    }
-
-    fn stop_driver_tool() -> Tool {
-        Tool {
-            name: "stop_driver".into(),
-            description: Some("Stop a specific WebDriver process".into()),
-            input_schema: Arc::new(
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "driver_type": {
-                            "type": "string",
-                            "description": "Type of driver to stop (chrome, firefox, edge)"
-                        }
-                    },
-                    "required": ["driver_type"]
-                }).as_object().unwrap().clone()),
-            annotations: None,
-        }
-    }
-
-    fn stop_all_drivers_tool() -> Tool {
-        Tool {
-            name: "stop_all_drivers".into(),
-            description: Some("Stop all managed WebDriver processes".into()),
-            input_schema: Arc::new(
-                json!({
-                    "type": "object",
-                    "properties": {}
-                }).as_object().unwrap().clone()),
-            annotations: None,
-        }
-    }
-
-}
-
-pub fn success_response(message: String) -> rmcp::model::CallToolResult {
-    rmcp::model::CallToolResult {
-        content: vec![Content::text(message)],
-        is_error: Some(false),
-    }
-}
-
-pub fn error_response(message: String) -> rmcp::model::CallToolResult {
-    rmcp::model::CallToolResult {
-        content: vec![Content::text(message)],
-        is_error: Some(true),
     }
 }

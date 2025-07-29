@@ -4,10 +4,15 @@ use rust_browser_mcp::WebDriverServer;
 
 use rmcp::transport::streamable_http_server::{
     StreamableHttpService, session::local::LocalSessionManager,
+    session::SessionManager,
 };
+use tokio::sync::RwLock;
+use std::collections::HashMap;
+use std::sync::Arc as StdArc;
 use tower_http::cors::CorsLayer;
-use rust_browser_mcp::oauth::{OAuthConfig, OAuthStore, create_oauth_router, validate_token_middleware};
-use axum::middleware;
+use rust_browser_mcp::auth::oauth::{OAuthConfig, OAuthStore, create_oauth_router};
+use axum::{middleware, extract::State, http::{Request, StatusCode}, response::Response, body::Body};
+use axum::middleware::Next;
 use std::sync::Arc;
 
 pub async fn run_http_server(server: WebDriverServer, bind_addr: &str, no_auth: bool) -> Result<()> {
@@ -42,11 +47,19 @@ pub async fn run_http_server(server: WebDriverServer, bind_addr: &str, no_auth: 
         let oauth_config = OAuthConfig::default();
         let oauth_store = Arc::new(OAuthStore::new(oauth_config));
 
-        // Create protected MCP routes with OAuth middleware
+        // Create session manager for OAuth users
+        let session_manager = Arc::new(
+            rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default()
+        );
+
+        // Create OAuth-to-session mapping
+        let oauth_sessions: Arc<RwLock<HashMap<String, StdArc<str>>>> = Arc::new(RwLock::new(HashMap::new()));
+
+        // Create protected MCP routes with OAuth middleware and session management
         let protected_service = tower::ServiceBuilder::new()
             .layer(middleware::from_fn_with_state(
-                oauth_store.clone(),
-                validate_token_middleware,
+                (oauth_store.clone(), session_manager.clone(), oauth_sessions.clone()),
+                oauth_session_middleware,
             ))
             .service(service);
 
@@ -97,4 +110,115 @@ pub async fn run_http_server(server: WebDriverServer, bind_addr: &str, no_auth: 
 
     tracing::info!("WebDriver MCP HTTP Server stopped");
     Ok(())
+}
+
+/// OAuth session middleware that ensures sessions exist for OAuth-authenticated users
+async fn oauth_session_middleware(
+    State((oauth_store, session_manager, oauth_sessions)): State<(Arc<OAuthStore>, Arc<LocalSessionManager>, Arc<RwLock<HashMap<String, StdArc<str>>>>)>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    // First validate the OAuth token using the existing middleware logic
+    let token = if let Some(auth_header) = request.headers().get("Authorization") {
+        let header_str = auth_header.to_str().unwrap_or("");
+        header_str.strip_prefix("Bearer ").map(|token| token.to_string())
+    } else {
+        None
+    };
+
+    let token = token.or_else(|| {
+        request.headers().get("cookie")
+            .and_then(|cookie_header| cookie_header.to_str().ok())
+            .and_then(|cookies| {
+                for cookie in cookies.split(';') {
+                    let cookie = cookie.trim();
+                    if let Some(token) = cookie.strip_prefix("auth_token=") {
+                        return Some(token.to_string());
+                    }
+                }
+                None
+            })
+    });
+
+    let token = match token {
+        Some(token) => token,
+        None => {
+            return Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body("Missing authentication token".into())
+                .unwrap();
+        }
+    };
+
+    // Validate token
+    let token_info = match oauth_store.validate_token(&token).await {
+        Some(token_info) => token_info,
+        None => {
+            return Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body("Invalid token".into())
+                .unwrap();
+        }
+    };
+
+    // Get or create session for this OAuth user
+    let user_key = token_info.user_id.clone();
+    let session_id = {
+        let oauth_sessions_read = oauth_sessions.read().await;
+        oauth_sessions_read.get(&user_key).cloned()
+    };
+
+    let session_id = match session_id {
+        Some(existing_session_id) => {
+            // Verify session still exists
+            if let Ok(true) = session_manager.has_session(&existing_session_id).await {
+                existing_session_id
+            } else {
+                // Session was dropped, remove from mapping and create new one
+                oauth_sessions.write().await.remove(&user_key);
+                match session_manager.create_session().await {
+                    Ok((new_session_id, _transport)) => {
+                        oauth_sessions.write().await.insert(user_key.clone(), new_session_id.clone());
+                        tracing::debug!("Created new session {} for OAuth user {}", new_session_id, user_key);
+                        new_session_id
+                    },
+                    Err(e) => {
+                        tracing::error!("Failed to create session for OAuth user {}: {}", user_key, e);
+                        return Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body("Failed to create session".into())
+                            .unwrap();
+                    }
+                }
+            }
+        },
+        None => {
+            // No existing session, create one
+            match session_manager.create_session().await {
+                Ok((new_session_id, _transport)) => {
+                    oauth_sessions.write().await.insert(user_key.clone(), new_session_id.clone());
+                    tracing::debug!("Created session {} for OAuth user {}", new_session_id, user_key);
+                    new_session_id
+                },
+                Err(e) => {
+                    tracing::error!("Failed to create session for OAuth user {}: {}", user_key, e);
+                    return Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body("Failed to create session".into())
+                        .unwrap();
+                }
+            }
+        }
+    };
+
+    // Add session ID header for StreamableHttpService
+    request.headers_mut().insert(
+        "mcp-session-id",
+        session_id.as_ref().parse().unwrap()
+    );
+
+    // Add user info to request extensions
+    request.extensions_mut().insert(token_info);
+    
+    next.run(request).await
 }

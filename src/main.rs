@@ -53,12 +53,16 @@ enum BrowserType {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let default_log_level = if cfg!(debug_assertions) { "debug" } else { "error" };
-    
+    let default_log_level = if cfg!(debug_assertions) {
+        "info"
+    } else {
+        "error"
+    };
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_log_level))
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_log_level)),
         )
         .with_writer(std::io::stderr)
         .with_ansi(false)
@@ -71,11 +75,11 @@ async fn main() -> Result<()> {
         BrowserType::Firefox => "firefox".to_string(),
         BrowserType::Edge => "edge".to_string(),
     };
-    
+
     config.preferred_driver = Some(preferred_browser.clone());
     // When a specific browser is chosen via CLI, only start that browser instead of all concurrent drivers
     config.concurrent_drivers = vec![preferred_browser];
-    
+
     // Override performance memory setting from CLI if provided
     if cli.enable_performance_memory {
         config.enable_performance_memory = true;
@@ -90,6 +94,8 @@ async fn main() -> Result<()> {
             tracing::info!(
                 "Starting WebDriver MCP Server on stdio with auto-detection and auto-start"
             );
+            // Temporarily skip buffered stdio to test regular stdio
+            tracing::info!("Using regular stdio transport for debugging");
             run_stdio_server(server).await
         }
         TransportMode::Http => {

@@ -108,7 +108,7 @@ Add to your `claude_desktop_config.json`:
 ### Stdio Mode
 ```bash
 # Add WebDriver MCP server
-claude mcp add webdriver --env WEBDRIVER_HEADLESS=true -- /path/to/rust-browser-mcp --transport stdio --browser chrome
+claude mcp add browser --env WEBDRIVER_HEADLESS=true -- /home/emil/webdriver-mcp/target/release/rust-browser-mcp --transport stdio --browser firefox --enable-performance-memory
 
 # With multiple browsers
 claude mcp add webdriver \

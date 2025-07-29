@@ -18,11 +18,11 @@ use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
-use crate::keycloak::KeycloakClient;
+use crate::auth::keycloak::KeycloakClient;
 
-pub use crate::keycloak::KeycloakConfig as OAuthConfig;
+pub use crate::auth::keycloak::KeycloakConfig as OAuthConfig;
 
-pub use crate::keycloak::KeycloakAuthState as OAuthSession;
+pub use crate::auth::keycloak::KeycloakAuthState as OAuthSession;
 
 /// Access token information
 #[derive(Clone, Debug)]
@@ -371,7 +371,7 @@ pub async fn oauth_callback_post(
     )).into_response()
 }
 
-/// Token validation middleware
+/// Token validation middleware with session ID injection
 pub async fn validate_token_middleware(
     State(store): State<Arc<OAuthStore>>,
     mut request: Request<Body>,
@@ -413,7 +413,19 @@ pub async fn validate_token_middleware(
     match store.validate_token(&token).await {
         Some(token_info) => {
             // Add user info to request extensions for downstream use
-            request.extensions_mut().insert(token_info);
+            request.extensions_mut().insert(token_info.clone());
+            
+            // Inject Mcp-Session-Id header if not present (for StreamableHttpService compatibility)
+            if !request.headers().contains_key("mcp-session-id") {
+                // Use a deterministic session ID based on user_id to maintain consistency
+                let session_id = format!("oauth-session-{}", token_info.user_id);
+                request.headers_mut().insert(
+                    "mcp-session-id",
+                    session_id.parse().unwrap()
+                );
+                tracing::debug!("Injected session ID for OAuth user: {}", session_id);
+            }
+            
             next.run(request).await
         }
         None => (StatusCode::UNAUTHORIZED, "Invalid token").into_response(),

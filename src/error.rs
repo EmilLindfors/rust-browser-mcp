@@ -6,6 +6,11 @@ pub enum WebDriverError {
     Session(String),
     ElementNotFound { selector: String },
     Timeout { selector: String },
+    FileSystem(String),
+    Serialization(String),
+    NotFound(String),
+    InvalidRecipe(String),
+    Execution(String),
     Generic(anyhow::Error),
 }
 
@@ -16,6 +21,11 @@ impl fmt::Display for WebDriverError {
             Self::Session(msg) => write!(f, "Session error: {msg}"),
             Self::ElementNotFound { selector } => write!(f, "Element not found: {selector}"),
             Self::Timeout { selector } => write!(f, "Timeout waiting for element: {selector}"),
+            Self::FileSystem(msg) => write!(f, "File system error: {msg}"),
+            Self::Serialization(msg) => write!(f, "Serialization error: {msg}"),
+            Self::NotFound(msg) => write!(f, "Not found: {msg}"),
+            Self::InvalidRecipe(msg) => write!(f, "Invalid recipe: {msg}"),
+            Self::Execution(msg) => write!(f, "Execution error: {msg}"),
             Self::Generic(e) => write!(f, "Generic error: {e}"),
         }
     }

@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
     let client = ()
         .serve(TokioChildProcess::new(Command::new("cargo").configure(
             |cmd| {
-                cmd.arg("run").arg("--bin").arg("webdriver-mcp");
+                cmd.arg("run").arg("--bin").arg("rust-browser-mcp");
             },
         ))?)
         .await?;

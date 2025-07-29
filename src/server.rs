@@ -6,12 +6,14 @@ use serde_json::{Map, Value};
 use crate::{
     ClientManager,
     config::Config,
+    recipes::{RecipeManager, RecipeTemplate, RecipeExecutor, ExecutionContext},
     tools::{ToolDefinitions, ServerMode, error_response, success_response},
 };
 
 #[derive(Clone)]
 pub struct WebDriverServer {
     client_manager: ClientManager,
+    recipe_manager: RecipeManager,
     mode: ServerMode,
 }
 
@@ -20,6 +22,7 @@ impl WebDriverServer {
         let config = Config::from_env();
         Ok(Self {
             client_manager: ClientManager::new(config)?,
+            recipe_manager: RecipeManager::new(None),
             mode: ServerMode::Stdio,
         })
     }
@@ -27,6 +30,7 @@ impl WebDriverServer {
     pub fn with_config(config: Config) -> crate::error::Result<Self> {
         Ok(Self {
             client_manager: ClientManager::new(config)?,
+            recipe_manager: RecipeManager::new(None),
             mode: ServerMode::Stdio,
         })
     }
@@ -34,6 +38,7 @@ impl WebDriverServer {
     pub fn with_config_and_mode(config: Config, mode: ServerMode) -> crate::error::Result<Self> {
         Ok(Self {
             client_manager: ClientManager::new(config)?,
+            recipe_manager: RecipeManager::new(None),
             mode,
         })
     }
@@ -48,7 +53,7 @@ impl WebDriverServer {
         let config = self.client_manager.get_config();
         
         if config.auto_start_driver && !config.concurrent_drivers.is_empty() {
-            tracing::info!("Starting concurrent webdrivers: {:?}", config.concurrent_drivers);
+            tracing::debug!("Starting concurrent webdrivers: {:?}", config.concurrent_drivers);
             
             let driver_manager = self.client_manager.get_driver_manager();
             let drivers = config.concurrent_drivers.clone();
@@ -74,22 +79,22 @@ impl WebDriverServer {
                             }
                         }
                         
-                        tracing::info!("Successfully started {}/{} WebDrivers:", started_count, requested_count);
+                        tracing::debug!("Successfully started {}/{} WebDrivers:", started_count, requested_count);
                         for (driver_type, endpoint) in &started_drivers {
-                            tracing::info!("  {} → {}", driver_type.browser_name(), endpoint);
+                            tracing::debug!("  {} → {}", driver_type.browser_name(), endpoint);
                         }
                     } else {
                         // All drivers started successfully
-                        tracing::info!("Successfully started all {} WebDrivers:", started_count);
+                        tracing::debug!("Successfully started all {} WebDrivers:", started_count);
                         for (driver_type, endpoint) in &started_drivers {
-                            tracing::info!("  {} → {}", driver_type.browser_name(), endpoint);
+                            tracing::debug!("  {} → {}", driver_type.browser_name(), endpoint);
                         }
                     }
                     
                     // Start periodic health checks every 30 seconds
                     let health_check_interval = std::time::Duration::from_secs(30);
                     let _health_check_handle = driver_manager.start_periodic_health_checks(health_check_interval);
-                    tracing::info!("Started periodic health checks (every {:?})", health_check_interval);
+                    tracing::debug!("Started periodic health checks (every {:?})", health_check_interval);
                 }
                 Err(e) => {
                     tracing::warn!("Failed to start some WebDriver processes: {}. Server will continue with reactive startup.", e);
@@ -172,11 +177,15 @@ impl WebDriverServer {
         let driver_manager = self.client_manager.get_driver_manager();
         
         match driver_manager.start_driver_manually(driver_type.clone()).await {
-            Ok(endpoint) => Ok(success_response(format!(
-                "Successfully started {} WebDriver at {}",
-                driver_type.browser_name(),
-                endpoint
-            ))),
+            Ok(endpoint) => {
+                // Additional health refresh to ensure driver is available for recipe execution
+                let _ = driver_manager.refresh_driver_health().await;
+                Ok(success_response(format!(
+                    "Successfully started {} WebDriver at {}",
+                    driver_type.browser_name(),
+                    endpoint
+                )))
+            },
             Err(e) => Ok(error_response(format!(
                 "Failed to start {} WebDriver: {}",
                 driver_type.browser_name(),
@@ -225,16 +234,26 @@ impl WebDriverServer {
         }
     }
 
+    async fn handle_force_cleanup_orphaned_processes(
+        &self,
+        _arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        match self.client_manager.force_cleanup_orphaned_processes_public().await {
+            Ok(_) => Ok(success_response("Successfully force cleaned up all orphaned browser and WebDriver processes".to_string())),
+            Err(e) => Ok(error_response(format!("Failed to force cleanup orphaned processes: {e}"))),
+        }
+    }
+
     /// Cleanup method to stop any managed driver processes
     pub async fn cleanup(&self) -> crate::error::Result<()> {
         tracing::info!("WebDriver MCP Server shutting down...");
         
         // First close all active WebDriver sessions gracefully
-        tracing::info!("Closing active WebDriver sessions...");
+        tracing::debug!("Closing active WebDriver sessions...");
         if let Err(e) = self.client_manager.close_all_sessions().await {
             tracing::warn!("Error closing WebDriver sessions: {}", e);
         } else {
-            tracing::info!("WebDriver sessions closed successfully");
+            tracing::debug!("WebDriver sessions closed successfully");
         }
         
         // Add a small delay to allow session cleanup to complete
@@ -242,17 +261,27 @@ impl WebDriverServer {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         
         // Then stop all managed driver processes
-        tracing::info!("Stopping WebDriver processes...");
+        tracing::debug!("Stopping WebDriver processes...");
         match self.client_manager
             .get_driver_manager()
             .stop_all_drivers()
             .await 
         {
-            Ok(()) => tracing::info!("Successfully stopped all WebDriver processes"),
-            Err(e) => tracing::warn!("Error stopping WebDriver processes: {}", e),
+            Ok(()) => tracing::debug!("Successfully stopped all WebDriver processes"),
+            Err(e) => {
+                tracing::warn!("Error stopping WebDriver processes: {}", e);
+                
+                // Fallback: Force cleanup any remaining orphaned processes
+                tracing::info!("Attempting force cleanup of orphaned processes...");
+                if let Err(cleanup_err) = self.client_manager.force_cleanup_orphaned_processes_public().await {
+                    tracing::error!("Force cleanup also failed: {}", cleanup_err);
+                } else {
+                    tracing::info!("Force cleanup completed successfully");
+                }
+            },
         }
         
-        tracing::info!("WebDriver MCP Server cleanup completed");
+        tracing::debug!("WebDriver MCP Server cleanup completed");
         Ok(())
     }
 
@@ -278,9 +307,15 @@ impl WebDriverServer {
 
         match self.client_manager.get_or_create_client(session_id).await {
             Ok((session, client)) => match client.goto(url).await {
-                Ok(_) => Ok(success_response(format!(
-                    "Successfully navigated to {url} (session: {session})"
-                ))),
+                Ok(_) => {
+                    // Set up console monitoring immediately after navigation
+                    if let Err(e) = self.setup_console_monitoring(&client).await {
+                        eprintln!("Warning: Failed to setup console monitoring: {}", e);
+                    }
+                    Ok(success_response(format!(
+                        "Successfully navigated to {url} (session: {session})"
+                    )))
+                },
                 Err(e) => Ok(error_response(format!("Failed to navigate: {e}"))),
             },
             Err(e) => Ok(error_response(format!(
@@ -517,6 +552,56 @@ impl WebDriverServer {
         }
     }
 
+    async fn handle_resize_window(
+        &self,
+        arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        let session_id = Self::extract_session_id(arguments);
+        
+        let width = arguments
+            .as_ref()
+            .and_then(|args| args.get("width"))
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| McpError::invalid_params("width parameter required", None))?;
+            
+        let height = arguments
+            .as_ref()
+            .and_then(|args| args.get("height"))
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| McpError::invalid_params("height parameter required", None))?;
+
+        // Validate dimensions
+        if width <= 0.0 || height <= 0.0 {
+            return Ok(error_response("Width and height must be positive numbers".to_string()));
+        }
+        
+        if width > 10000.0 || height > 10000.0 {
+            return Ok(error_response("Width and height must be less than 10000 pixels".to_string()));
+        }
+
+        match self.client_manager.get_or_create_client(session_id).await {
+            Ok((session, client)) => match client.set_window_size(width as u32, height as u32).await {
+                Ok(_) => {
+                    // Verify the resize by getting the current size
+                    match client.get_window_size().await {
+                        Ok((actual_width, actual_height)) => Ok(success_response(format!(
+                            "Window resized to {}x{} pixels (session: {})", 
+                            actual_width, actual_height, session
+                        ))),
+                        Err(_) => Ok(success_response(format!(
+                            "Window resize command sent ({}x{}) (session: {})",
+                            width, height, session
+                        ))),
+                    }
+                }
+                Err(e) => Ok(error_response(format!("Failed to resize window: {e}"))),
+            },
+            Err(e) => Ok(error_response(format!(
+                "Failed to create webdriver client: {e}"
+            ))),
+        }
+    }
+
     async fn handle_get_current_url(
         &self,
         arguments: &Option<Map<String, Value>>,
@@ -582,9 +667,15 @@ impl WebDriverServer {
 
         match self.client_manager.get_or_create_client(session_id).await {
             Ok((session, client)) => match client.refresh().await {
-                Ok(_) => Ok(success_response(format!(
-                    "Successfully refreshed page (session: {session})"
-                ))),
+                Ok(_) => {
+                    // Set up console monitoring immediately after refresh
+                    if let Err(e) = self.setup_console_monitoring(&client).await {
+                        eprintln!("Warning: Failed to setup console monitoring: {}", e);
+                    }
+                    Ok(success_response(format!(
+                        "Successfully refreshed page (session: {session})"
+                    )))
+                },
                 Err(e) => Ok(error_response(format!("Failed to refresh page: {e}"))),
             },
             Err(e) => Ok(error_response(format!(
@@ -656,6 +747,254 @@ impl WebDriverServer {
                     Err(e) => Ok(error_response(format!(
                         "Element '{selector}' not found within {timeout_seconds:.1}s: {e}"
                     ))),
+                }
+            }
+            Err(e) => Ok(error_response(format!(
+                "Failed to create webdriver client: {e}"
+            ))),
+        }
+    }
+
+    async fn handle_wait_for_condition(
+        &self,
+        arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        let condition = arguments
+            .as_ref()
+            .and_then(|args| args.get("condition"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_params("condition parameter required", None))?;
+
+        let timeout_seconds = arguments
+            .as_ref()
+            .and_then(|args| args.get("timeout_seconds"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(10.0);
+
+        let check_interval_ms = arguments
+            .as_ref()
+            .and_then(|args| args.get("check_interval_ms"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(100.0) as u64;
+
+        let session_id = Self::extract_session_id(arguments);
+
+        match self.client_manager.get_or_create_client(session_id).await {
+            Ok((session, client)) => {
+                let start_time = std::time::Instant::now();
+                let timeout_duration = std::time::Duration::from_secs_f64(timeout_seconds);
+                let check_interval = std::time::Duration::from_millis(check_interval_ms);
+
+                loop {
+                    // Check if condition is true
+                    match client.execute(condition, vec![]).await {
+                        Ok(result) => {
+                            // Check if result is truthy
+                            let is_true = match result {
+                                serde_json::Value::Bool(b) => b,
+                                serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0) != 0.0,
+                                serde_json::Value::String(s) => !s.is_empty(),
+                                serde_json::Value::Array(arr) => !arr.is_empty(),
+                                serde_json::Value::Object(obj) => !obj.is_empty(),
+                                serde_json::Value::Null => false,
+                            };
+
+                            if is_true {
+                                let elapsed = start_time.elapsed();
+                                return Ok(success_response(format!(
+                                    "Condition '{}' became true after {:.1}s (session: {})",
+                                    condition,
+                                    elapsed.as_secs_f64(),
+                                    session
+                                )));
+                            }
+                        }
+                        Err(e) => {
+                            // JavaScript error - condition might be malformed
+                            return Ok(error_response(format!(
+                                "Error evaluating condition '{}': {}",
+                                condition, e
+                            )));
+                        }
+                    }
+
+                    // Check timeout
+                    if start_time.elapsed() >= timeout_duration {
+                        return Ok(error_response(format!(
+                            "Condition '{}' did not become true within {:.1}s (session: {})",
+                            condition, timeout_seconds, session
+                        )));
+                    }
+
+                    // Wait before next check
+                    tokio::time::sleep(check_interval).await;
+                }
+            }
+            Err(e) => Ok(error_response(format!(
+                "Failed to create webdriver client: {e}"
+            ))),
+        }
+    }
+
+    async fn handle_get_element_info(
+        &self,
+        arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        let selector = arguments
+            .as_ref()
+            .and_then(|args| args.get("selector"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_params("selector parameter required", None))?;
+
+        let include_computed_styles = arguments
+            .as_ref()
+            .and_then(|args| args.get("include_computed_styles"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let wait_timeout = arguments
+            .as_ref()
+            .and_then(|args| args.get("wait_timeout"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
+        let session_id = Self::extract_session_id(arguments);
+
+        match self.client_manager.get_or_create_client(session_id).await {
+            Ok((session, client)) => {
+                let _element = if wait_timeout > 0.0 {
+                    match self
+                        .client_manager
+                        .find_element_with_wait(&client, selector, Some(wait_timeout))
+                        .await
+                    {
+                        Ok(element) => element,
+                        Err(e) => {
+                            return Ok(error_response(format!(
+                                "Element '{selector}' not found within {wait_timeout:.1}s: {e}"
+                            )));
+                        }
+                    }
+                } else {
+                    match client.find(Locator::Css(selector)).await {
+                        Ok(element) => element,
+                        Err(e) => {
+                            return Ok(error_response(format!(
+                                "Element '{selector}' not found: {e}"
+                            )));
+                        }
+                    }
+                };
+
+                // JavaScript to get comprehensive element information
+                let info_script = format!(
+                    r#"
+                    try {{
+                        const element = document.querySelector('{}');
+                        if (!element) {{
+                            return {{ error: 'Element not found' }};
+                        }}
+                        
+                        const rect = element.getBoundingClientRect();
+                        const style = window.getComputedStyle(element);
+                        
+                        const info = {{
+                            tagName: element.tagName.toLowerCase(),
+                            id: element.id || null,
+                            className: element.className || null,
+                            
+                            // Visibility
+                            isVisible: rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none',
+                            isInViewport: rect.top >= 0 && rect.left >= 0 && rect.bottom <= window.innerHeight && rect.right <= window.innerWidth,
+                            
+                            // Size and position
+                            boundingRect: {{
+                                x: Math.round(rect.x),
+                                y: Math.round(rect.y),
+                                width: Math.round(rect.width),
+                                height: Math.round(rect.height),
+                                top: Math.round(rect.top),
+                                right: Math.round(rect.right),
+                                bottom: Math.round(rect.bottom),
+                                left: Math.round(rect.left)
+                            }},
+                            
+                            // Offset dimensions
+                            offsetWidth: element.offsetWidth,
+                            offsetHeight: element.offsetHeight,
+                            offsetTop: element.offsetTop,
+                            offsetLeft: element.offsetLeft,
+                            
+                            // Client dimensions
+                            clientWidth: element.clientWidth,
+                            clientHeight: element.clientHeight,
+                            
+                            // Scroll dimensions
+                            scrollWidth: element.scrollWidth,
+                            scrollHeight: element.scrollHeight,
+                            scrollTop: element.scrollTop,
+                            scrollLeft: element.scrollLeft,
+                            
+                            // Key computed styles
+                            computedStyles: {{
+                                display: style.display,
+                                visibility: style.visibility,
+                                opacity: style.opacity,
+                                position: style.position,
+                                zIndex: style.zIndex,
+                                overflow: style.overflow,
+                                overflowX: style.overflowX,
+                                overflowY: style.overflowY
+                            }}{}
+                        }};
+                        
+                        return info;
+                    }} catch (e) {{
+                        return {{ error: e.message }};
+                    }}
+                    "#,
+                    selector.replace('\'', "\\'"),
+                    if include_computed_styles {
+                        r#",
+                            allComputedStyles: {
+                                width: style.width,
+                                height: style.height,
+                                margin: style.margin,
+                                padding: style.padding,
+                                border: style.border,
+                                backgroundColor: style.backgroundColor,
+                                color: style.color,
+                                fontSize: style.fontSize,
+                                fontFamily: style.fontFamily,
+                                lineHeight: style.lineHeight,
+                                textAlign: style.textAlign,
+                                transform: style.transform,
+                                transition: style.transition,
+                                animation: style.animation
+                            }"#
+                    } else {
+                        ""
+                    }
+                );
+
+                match client.execute(&info_script, vec![]).await {
+                    Ok(result) => {
+                        if let Ok(info) = serde_json::from_value::<serde_json::Map<String, serde_json::Value>>(result.clone()) {
+                            if let Some(error) = info.get("error") {
+                                Ok(error_response(format!("JavaScript error: {}", error)))
+                            } else {
+                                let formatted_info = serde_json::to_string_pretty(&info)
+                                    .unwrap_or_else(|_| format!("{:?}", info));
+                                Ok(success_response(format!(
+                                    "Element info for '{}' (session: {}):\n{}",
+                                    selector, session, formatted_info
+                                )))
+                            }
+                        } else {
+                            Ok(error_response(format!("Failed to parse element info: {:?}", result)))
+                        }
+                    }
+                    Err(e) => Ok(error_response(format!("Failed to get element info: {e}"))),
                 }
             }
             Err(e) => Ok(error_response(format!(
@@ -802,33 +1141,96 @@ impl WebDriverServer {
             .and_then(|v| v.as_str())
             .ok_or_else(|| McpError::invalid_params("selector parameter required", None))?;
 
+        let parent_selector = arguments
+            .as_ref()
+            .and_then(|args| args.get("parent_selector"))
+            .and_then(|v| v.as_str());
+
+        let wait_timeout = arguments
+            .as_ref()
+            .and_then(|args| args.get("wait_timeout"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
         let session_id = Self::extract_session_id(arguments);
 
         match self.client_manager.get_or_create_client(session_id).await {
-            Ok((session, client)) => match client.find(Locator::Css(selector)).await {
-                Ok(element) => {
-                    let tag_name = element
-                        .tag_name()
-                        .await
-                        .unwrap_or_else(|_| "unknown".to_string());
-                    let text_content = element
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "[no text]".to_string());
-                    let text_preview = if text_content.len() > 100 {
-                        format!("{}...", &text_content[..97])
+            Ok((session, client)) => {
+                // If parent_selector is provided, find within parent
+                let search_result = if let Some(parent_sel) = parent_selector {
+                    // First find the parent element
+                    let parent_element = if wait_timeout > 0.0 {
+                        match self
+                            .client_manager
+                            .find_element_with_wait(&client, parent_sel, Some(wait_timeout))
+                            .await
+                        {
+                            Ok(element) => element,
+                            Err(e) => {
+                                return Ok(error_response(format!(
+                                    "Parent element '{}' not found within {:.1}s: {}",
+                                    parent_sel, wait_timeout, e
+                                )));
+                            }
+                        }
                     } else {
-                        text_content
+                        match client.find(Locator::Css(parent_sel)).await {
+                            Ok(element) => element,
+                            Err(e) => {
+                                return Ok(error_response(format!(
+                                    "Parent element '{}' not found: {}",
+                                    parent_sel, e
+                                )));
+                            }
+                        }
                     };
 
-                    Ok(success_response(format!(
-                        "Found element '{selector}' (session: {session}): <{tag_name}> - Text: \"{text_preview}\""
-                    )))
+                    // Then find child element within parent
+                    parent_element.find(Locator::Css(selector)).await
+                        .map_err(|e| format!("Child element '{}' not found within parent '{}': {}", selector, parent_sel, e))
+                } else {
+                    // Standard search without parent
+                    if wait_timeout > 0.0 {
+                        self.client_manager
+                            .find_element_with_wait(&client, selector, Some(wait_timeout))
+                            .await
+                            .map_err(|e| format!("Element '{}' not found within {:.1}s: {}", selector, wait_timeout, e))
+                    } else {
+                        client.find(Locator::Css(selector)).await
+                            .map_err(|e| format!("Element '{}' not found: {}", selector, e))
+                    }
+                };
+
+                match search_result {
+                    Ok(element) => {
+                        let tag_name = element
+                            .tag_name()
+                            .await
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        let text_content = element
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "[no text]".to_string());
+                        let text_preview = if text_content.len() > 100 {
+                            format!("{}...", &text_content[..97])
+                        } else {
+                            text_content
+                        };
+
+                        let scope_msg = if let Some(parent_sel) = parent_selector {
+                            format!(" within parent '{}'", parent_sel)
+                        } else {
+                            String::new()
+                        };
+
+                        Ok(success_response(format!(
+                            "Found element '{}'{} (session: {}): <{}> - Text: \"{}\"",
+                            selector, scope_msg, session, tag_name, text_preview
+                        )))
+                    }
+                    Err(e) => Ok(error_response(e)),
                 }
-                Err(e) => Ok(error_response(format!(
-                    "Failed to find element '{selector}': {e}"
-                ))),
-            },
+            }
             Err(e) => Ok(error_response(format!(
                 "Failed to create webdriver client: {e}"
             ))),
@@ -845,47 +1247,103 @@ impl WebDriverServer {
             .and_then(|v| v.as_str())
             .ok_or_else(|| McpError::invalid_params("selector parameter required", None))?;
 
+        let parent_selector = arguments
+            .as_ref()
+            .and_then(|args| args.get("parent_selector"))
+            .and_then(|v| v.as_str());
+
+        let wait_timeout = arguments
+            .as_ref()
+            .and_then(|args| args.get("wait_timeout"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
         let session_id = Self::extract_session_id(arguments);
 
         match self.client_manager.get_or_create_client(session_id).await {
-            Ok((session, client)) => match client.find_all(Locator::Css(selector)).await {
-                Ok(elements) => {
-                    let mut result_text = format!(
-                        "Found {} element(s) matching '{}' (session: {}):\n\n",
-                        elements.len(),
-                        selector,
-                        session
-                    );
+            Ok((session, client)) => {
+                // If parent_selector is provided, find within parent
+                let search_result = if let Some(parent_sel) = parent_selector {
+                    // First find the parent element
+                    let parent_element = if wait_timeout > 0.0 {
+                        match self
+                            .client_manager
+                            .find_element_with_wait(&client, parent_sel, Some(wait_timeout))
+                            .await
+                        {
+                            Ok(element) => element,
+                            Err(e) => {
+                                return Ok(error_response(format!(
+                                    "Parent element '{}' not found within {:.1}s: {}",
+                                    parent_sel, wait_timeout, e
+                                )));
+                            }
+                        }
+                    } else {
+                        match client.find(Locator::Css(parent_sel)).await {
+                            Ok(element) => element,
+                            Err(e) => {
+                                return Ok(error_response(format!(
+                                    "Parent element '{}' not found: {}",
+                                    parent_sel, e
+                                )));
+                            }
+                        }
+                    };
 
-                    for (i, element) in elements.iter().enumerate() {
-                        let tag_name = element
-                            .tag_name()
-                            .await
-                            .unwrap_or_else(|_| "unknown".to_string());
-                        let text_content = element
-                            .text()
-                            .await
-                            .unwrap_or_else(|_| "[no text]".to_string());
-                        let text_preview = if text_content.len() > 100 {
-                            format!("{}...", &text_content[..97])
+                    // Then find child elements within parent
+                    parent_element.find_all(Locator::Css(selector)).await
+                        .map_err(|e| format!("Child elements '{}' not found within parent '{}': {}", selector, parent_sel, e))
+                } else {
+                    // Standard search without parent
+                    client.find_all(Locator::Css(selector)).await
+                        .map_err(|e| format!("Elements '{}' not found: {}", selector, e))
+                };
+
+                match search_result {
+                    Ok(elements) => {
+                        let scope_msg = if let Some(parent_sel) = parent_selector {
+                            format!(" within parent '{}'", parent_sel)
                         } else {
-                            text_content
+                            String::new()
                         };
 
-                        result_text.push_str(&format!(
-                            "{}. <{}> - Text: \"{}\"\n",
-                            i + 1,
-                            tag_name,
-                            text_preview
-                        ));
-                    }
+                        let mut result_text = format!(
+                            "Found {} element(s) matching '{}'{} (session: {}):\n\n",
+                            elements.len(),
+                            selector,
+                            scope_msg,
+                            session
+                        );
 
-                    Ok(success_response(result_text))
+                        for (i, element) in elements.iter().enumerate() {
+                            let tag_name = element
+                                .tag_name()
+                                .await
+                                .unwrap_or_else(|_| "unknown".to_string());
+                            let text_content = element
+                                .text()
+                                .await
+                                .unwrap_or_else(|_| "[no text]".to_string());
+                            let text_preview = if text_content.len() > 100 {
+                                format!("{}...", &text_content[..97])
+                            } else {
+                                text_content
+                            };
+
+                            result_text.push_str(&format!(
+                                "{}. <{}> - Text: \"{}\"\n",
+                                i + 1,
+                                tag_name,
+                                text_preview
+                            ));
+                        }
+
+                        Ok(success_response(result_text))
+                    }
+                    Err(e) => Ok(error_response(e)),
                 }
-                Err(e) => Ok(error_response(format!(
-                    "Failed to find elements '{selector}': {e}"
-                ))),
-            },
+            }
             Err(e) => Ok(error_response(format!(
                 "Failed to create webdriver client: {e}"
             ))),
@@ -1280,13 +1738,13 @@ impl WebDriverServer {
         &self,
         arguments: &Option<Map<String, Value>>,
     ) -> Result<CallToolResult, McpError> {
-        let _level = arguments
+        let level_filter = arguments
             .as_ref()
             .and_then(|args| args.get("level"))
             .and_then(|v| v.as_str())
             .unwrap_or("all");
 
-        let _since_timestamp = arguments
+        let since_timestamp = arguments
             .as_ref()
             .and_then(|args| args.get("since_timestamp"))
             .and_then(|v| v.as_f64());
@@ -1306,99 +1764,69 @@ impl WebDriverServer {
                     tokio::time::sleep(std::time::Duration::from_secs_f64(wait_timeout)).await;
                 }
 
-                // JavaScript to capture console logs - simple working version
-                let console_script = r#"
+                // Simple script to retrieve stored console logs
+                let retrieve_script = r#"
                     try {
-                        if (!window.__mcpConsoleLogs) {
-                            window.__mcpConsoleLogs = [];
-                            
-                            const originalConsole = {
-                                log: console.log,
-                                error: console.error,
-                                warn: console.warn,
-                                info: console.info,
-                                debug: console.debug
-                            };
-                            
-                            ['log', 'error', 'warn', 'info', 'debug'].forEach(level => {
-                                console[level] = function(...args) {
-                                    originalConsole[level].apply(console, args);
-                                    window.__mcpConsoleLogs.push({
-                                        level: level,
-                                        message: args.map(arg => {
-                                            if (typeof arg === 'object') {
-                                                try {
-                                                    return JSON.stringify(arg, null, 2);
-                                                } catch (e) {
-                                                    return String(arg);
-                                                }
-                                            }
-                                            return String(arg);
-                                        }).join(' '),
-                                        timestamp: Date.now(),
-                                        url: window.location.href
-                                    });
-                                };
-                            });
-                            
-                            window.onerror = function(message, source, lineno, colno, error) {
-                                window.__mcpConsoleLogs.push({
-                                    level: 'error',
-                                    message: message + ' at ' + source + ':' + lineno + ':' + colno,
-                                    timestamp: Date.now(),
-                                    url: window.location.href,
-                                    stack: error ? error.stack : null
-                                });
-                                return false;
-                            };
-                            
-                            window.addEventListener('unhandledrejection', function(event) {
-                                window.__mcpConsoleLogs.push({
-                                    level: 'error',
-                                    message: 'Unhandled Promise Rejection: ' + event.reason,
-                                    timestamp: Date.now(),
-                                    url: window.location.href
-                                });
-                            });
-                        }
-                        
                         return window.__mcpConsoleLogs || [];
-                        
                     } catch (e) {
-                        return 'Error: ' + e.message;
+                        return [];
                     }
                 "#;
 
-                match client.execute(console_script, vec![]).await {
+                match client.execute(retrieve_script, vec![]).await {
                     Ok(result) => {
-                        // Parse the JavaScript result
-                        let logs_str = format!("{result:?}");
-                        
-                        // Also try to get any existing console entries via Performance API
-                        let performance_script = r#"
-                            // Try to get performance entries that might indicate errors
-                            const perfEntries = performance.getEntriesByType('navigation');
-                            const resourceEntries = performance.getEntriesByType('resource');
-                            
-                            const errorResources = resourceEntries.filter(entry => 
-                                entry.name.includes('.js') && 
-                                (entry.transferSize === 0 || entry.duration > 5000)
-                            );
-                            
-                            return {
-                                navigation: perfEntries.length > 0 ? perfEntries[0] : null,
-                                slowOrFailedResources: errorResources.slice(0, 10)
-                            };
-                        "#;
-                        
-                        let perf_result = client.execute(performance_script, vec![]).await
-                            .unwrap_or(serde_json::Value::Null);
+                        // Try to parse the result as JSON array of log entries
+                        let formatted_logs = if let Ok(logs) = serde_json::from_value::<Vec<serde_json::Value>>(result.clone()) {
+                            if logs.is_empty() {
+                                "No console logs found.".to_string()
+                            } else {
+                                logs.into_iter()
+                                    .filter(|log| {
+                                        // Filter by level
+                                        if level_filter != "all" {
+                                            let log_level = log.get("level").and_then(|v| v.as_str()).unwrap_or("");
+                                            if log_level != level_filter {
+                                                return false;
+                                            }
+                                        }
+                                        
+                                        // Filter by timestamp
+                                        if let Some(since) = since_timestamp {
+                                            let log_timestamp = log.get("timestamp").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                            if log_timestamp < since {
+                                                return false;
+                                            }
+                                        }
+                                        
+                                        true
+                                    })
+                                    .map(|log| {
+                                        let level = log.get("level").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                        let message = log.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                                        let timestamp = log.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+                                        let _url = log.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                                        
+                                        let time_str = if timestamp > 0 {
+                                            format!("[{}ms] ", timestamp)
+                                        } else {
+                                            "".to_string()
+                                        };
+                                        
+                                        format!("{time_str}{level}: {message}")
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            }
+                        } else {
+                            // Fallback if parsing fails
+                            format!("Raw result: {result:?}")
+                        };
 
                         Ok(success_response(format!(
-                            "Console logs captured (session: {session}):\n\n--- Console Messages ---\n{logs_str}\n\n--- Performance Info ---\n{perf_result:?}"
+                            "Console logs (session: {session}):\n{formatted_logs}"
                         )))
                     }
-                    Err(e) => Ok(error_response(format!("Failed to capture console logs: {e}"))),
+                    Err(e) => Ok(error_response(format!("Failed to retrieve console logs: {e}"))),
                 }
             }
             Err(e) => Ok(error_response(format!(
@@ -1919,6 +2347,72 @@ impl WebDriverServer {
         }
     }
 
+    // Helper method to inject console monitoring script
+    async fn setup_console_monitoring(&self, client: &fantoccini::Client) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let console_script = r#"
+            try {
+                if (!window.__mcpConsoleLogs) {
+                    window.__mcpConsoleLogs = [];
+                    
+                    const originalConsole = {
+                        log: console.log,
+                        error: console.error,
+                        warn: console.warn,
+                        info: console.info,
+                        debug: console.debug
+                    };
+                    
+                    ['log', 'error', 'warn', 'info', 'debug'].forEach(level => {
+                        console[level] = function(...args) {
+                            originalConsole[level].apply(console, args);
+                            window.__mcpConsoleLogs.push({
+                                level: level,
+                                message: args.map(arg => {
+                                    if (typeof arg === 'object') {
+                                        try {
+                                            return JSON.stringify(arg, null, 2);
+                                        } catch (e) {
+                                            return String(arg);
+                                        }
+                                    }
+                                    return String(arg);
+                                }).join(' '),
+                                timestamp: Date.now(),
+                                url: window.location.href
+                            });
+                        };
+                    });
+                    
+                    window.onerror = function(message, source, lineno, colno, error) {
+                        window.__mcpConsoleLogs.push({
+                            level: 'error',
+                            message: message + ' at ' + source + ':' + lineno + ':' + colno,
+                            timestamp: Date.now(),
+                            url: window.location.href,
+                            stack: error ? error.stack : null
+                        });
+                        return false;
+                    };
+                    
+                    window.addEventListener('unhandledrejection', function(event) {
+                        window.__mcpConsoleLogs.push({
+                            level: 'error',
+                            message: 'Unhandled Promise Rejection: ' + event.reason,
+                            timestamp: Date.now(),
+                            url: window.location.href
+                        });
+                    });
+                }
+                return true;
+            } catch (e) {
+                return false;
+            }
+        "#;
+
+        client.execute(console_script, vec![]).await?;
+        Ok(())
+    }
+
 }
 
 impl ServerHandler for WebDriverServer {
@@ -1961,12 +2455,15 @@ impl ServerHandler for WebDriverServer {
             "get_text" => self.handle_get_text(&request.arguments).await,
             "execute_script" => self.handle_execute_script(&request.arguments).await,
             "screenshot" => self.handle_screenshot(&request.arguments).await,
+            "resize_window" => self.handle_resize_window(&request.arguments).await,
             "get_current_url" => self.handle_get_current_url(&request.arguments).await,
             "back" => self.handle_back(&request.arguments).await,
             "forward" => self.handle_forward(&request.arguments).await,
             "refresh" => self.handle_refresh(&request.arguments).await,
             "get_page_load_status" => self.handle_get_page_load_status(&request.arguments).await,
             "wait_for_element" => self.handle_wait_for_element(&request.arguments).await,
+            "wait_for_condition" => self.handle_wait_for_condition(&request.arguments).await,
+            "get_element_info" => self.handle_get_element_info(&request.arguments).await,
             "get_attribute" => self.handle_get_element_attribute(&request.arguments).await,
             "get_page_source" => self.handle_get_page_source(&request.arguments).await,
             "get_property" => self.handle_get_element_property(&request.arguments).await,
@@ -2024,7 +2521,285 @@ impl ServerHandler for WebDriverServer {
                     Err(McpError::method_not_found::<CallToolRequestMethod>())
                 }
             }
+            "force_cleanup_orphaned_processes" => {
+                if self.mode == ServerMode::Stdio {
+                    self.handle_force_cleanup_orphaned_processes(&request.arguments).await
+                } else {
+                    Err(McpError::method_not_found::<CallToolRequestMethod>())
+                }
+            }
+            // Recipe management tools (available in both modes)
+            "create_recipe" => self.handle_create_recipe(&request.arguments).await,
+            "list_recipes" => self.handle_list_recipes(&request.arguments).await,
+            "get_recipe" => self.handle_get_recipe(&request.arguments).await,
+            "execute_recipe" => self.handle_execute_recipe(&request.arguments).await,
+            "delete_recipe" => self.handle_delete_recipe(&request.arguments).await,
+            "create_recipe_template" => self.handle_create_recipe_template(&request.arguments).await,
             _ => Err(McpError::method_not_found::<CallToolRequestMethod>()),
+        }
+    }
+}
+
+impl WebDriverServer {
+    // Recipe management tool handlers
+
+    async fn handle_create_recipe(
+        &self,
+        arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        let recipe_json = arguments
+            .as_ref()
+            .and_then(|args| args.get("recipe_json"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_params("recipe_json parameter required", None))?;
+
+        match crate::Recipe::from_json(recipe_json) {
+            Ok(recipe) => {
+                match recipe.validate() {
+                    Ok(_) => {
+                        match self.recipe_manager.save_recipe(&recipe).await {
+                            Ok(file_path) => Ok(success_response(format!(
+                                "Recipe '{}' created successfully at {}",
+                                recipe.name,
+                                file_path.display()
+                            ))),
+                            Err(e) => Ok(error_response(format!("Failed to save recipe: {}", e))),
+                        }
+                    }
+                    Err(e) => Ok(error_response(format!("Recipe validation failed: {}", e))),
+                }
+            }
+            Err(e) => Ok(error_response(format!("Invalid recipe JSON: {}", e))),
+        }
+    }
+
+    async fn handle_list_recipes(
+        &self,
+        _arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        match self.recipe_manager.list_recipes().await {
+            Ok(recipes) => {
+                if recipes.is_empty() {
+                    Ok(success_response("No recipes found".to_string()))
+                } else {
+                    let mut result = String::from("Available recipes:\n");
+                    for recipe in recipes {
+                        result.push_str(&format!("  {} (v{})", recipe.name, recipe.version));
+                        if let Some(desc) = &recipe.description {
+                            result.push_str(&format!(" - {}", desc));
+                        }
+                        result.push_str(&format!(" - {} steps\n", recipe.step_count));
+                    }
+                    Ok(success_response(result))
+                }
+            }
+            Err(e) => Ok(error_response(format!("Failed to list recipes: {}", e))),
+        }
+    }
+
+    async fn handle_get_recipe(
+        &self,
+        arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        let name = arguments
+            .as_ref()
+            .and_then(|args| args.get("name"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_params("name parameter required", None))?;
+
+        match self.recipe_manager.load_recipe(name).await {
+            Ok(recipe) => {
+                match recipe.to_json() {
+                    Ok(json) => Ok(success_response(json)),
+                    Err(e) => Ok(error_response(format!("Failed to serialize recipe: {}", e))),
+                }
+            }
+            Err(e) => Ok(error_response(format!("Failed to load recipe '{}': {}", name, e))),
+        }
+    }
+
+    async fn handle_execute_recipe(
+        &self,
+        arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        let name = arguments
+            .as_ref()
+            .and_then(|args| args.get("name"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_params("name parameter required", None))?;
+
+        let parameters: Option<std::collections::HashMap<String, String>> = arguments
+            .as_ref()
+            .and_then(|args| args.get("parameters"))
+            .and_then(|v| v.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            });
+
+        let session_id = arguments
+            .as_ref()
+            .and_then(|args| args.get("session_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let continue_on_error = arguments
+            .as_ref()
+            .and_then(|args| args.get("continue_on_error"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Load the recipe
+        let recipe = match self.recipe_manager.load_recipe(name).await {
+            Ok(recipe) => recipe,
+            Err(e) => return Ok(error_response(format!("Failed to load recipe '{}': {}", name, e))),
+        };
+
+        // Create execution context
+        let context = ExecutionContext {
+            session_id,
+            variables: std::collections::HashMap::new(),
+            continue_on_error,
+        };
+
+        // Execute the recipe
+        let executor = RecipeExecutor::new(self);
+        match executor.execute_recipe(&recipe, parameters, context).await {
+            Ok(result) => {
+                if result.success {
+                    Ok(success_response(result.to_summary_string()))
+                } else {
+                    Ok(error_response(result.to_detailed_string()))
+                }
+            }
+            Err(e) => Ok(error_response(format!("Recipe execution failed: {}", e))),
+        }
+    }
+
+    async fn handle_delete_recipe(
+        &self,
+        arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        let name = arguments
+            .as_ref()
+            .and_then(|args| args.get("name"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_params("name parameter required", None))?;
+
+        match self.recipe_manager.delete_recipe(name).await {
+            Ok(_) => Ok(success_response(format!("Recipe '{}' deleted successfully", name))),
+            Err(e) => Ok(error_response(format!("Failed to delete recipe '{}': {}", name, e))),
+        }
+    }
+
+    async fn handle_create_recipe_template(
+        &self,
+        arguments: &Option<Map<String, Value>>,
+    ) -> Result<CallToolResult, McpError> {
+        let template_type = arguments
+            .as_ref()
+            .and_then(|args| args.get("template"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_params("template parameter required", None))?;
+
+        // Helper function to parse browsers array
+        let parse_browsers = |args: &Option<Map<String, Value>>| -> Vec<String> {
+            args.as_ref()
+                .and_then(|args| args.get("browsers"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .filter(|browsers: &Vec<String>| !browsers.is_empty())
+                .unwrap_or_else(|| vec!["auto".to_string()])
+        };
+
+        let template = match template_type {
+            "login_and_screenshot" => {
+                let base_url = arguments
+                    .as_ref()
+                    .and_then(|args| args.get("base_url"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("http://localhost:3000")
+                    .to_string();
+
+                let username = arguments
+                    .as_ref()
+                    .and_then(|args| args.get("username"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("user")
+                    .to_string();
+
+                let password = arguments
+                    .as_ref()
+                    .and_then(|args| args.get("password"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("password")
+                    .to_string();
+
+                let browsers = Some(parse_browsers(arguments));
+                
+                RecipeTemplate::LoginAndScreenshot {
+                    base_url,
+                    username,
+                    password,
+                    browsers,
+                }
+            }
+            "multi_browser_screenshot" => {
+                let url = arguments
+                    .as_ref()
+                    .and_then(|args| args.get("url"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("https://example.com")
+                    .to_string();
+                let browsers = parse_browsers(arguments);
+                RecipeTemplate::MultiBrowserScreenshot { url, browsers }
+            }
+            "responsive_test" => {
+                let url = arguments
+                    .as_ref()
+                    .and_then(|args| args.get("url"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("https://example.com")
+                    .to_string();
+                let browsers = parse_browsers(arguments);
+                let resolutions = arguments
+                    .as_ref()
+                    .and_then(|args| args.get("resolutions"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| {
+                                v.as_object().and_then(|obj| {
+                                    let width = obj.get("width")?.as_f64()? as u32;
+                                    let height = obj.get("height")?.as_f64()? as u32;
+                                    Some((width, height))
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_else(|| vec![(1920, 1080), (768, 1024), (375, 667)]);
+                RecipeTemplate::ResponsiveTest { url, browsers, resolutions }
+            }
+            _ => return Ok(error_response(format!("Unknown template type: {}", template_type))),
+        };
+
+        match self.recipe_manager.create_recipe_from_template(template).await {
+            Ok(recipe) => {
+                match self.recipe_manager.save_recipe(&recipe).await {
+                    Ok(file_path) => Ok(success_response(format!(
+                        "Recipe '{}' created from template at {}",
+                        recipe.name,
+                        file_path.display()
+                    ))),
+                    Err(e) => Ok(error_response(format!("Failed to save recipe: {}", e))),
+                }
+            }
+            Err(e) => Ok(error_response(format!("Failed to create recipe from template: {}", e))),
         }
     }
 }

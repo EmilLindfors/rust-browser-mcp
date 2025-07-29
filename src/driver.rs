@@ -83,6 +83,7 @@ struct ManagedProcess {
     process: TokioChild,
     port: u16,
     pid: u32,
+    browser_pids: Vec<u32>, // Track spawned browser processes
 }
 
 impl DriverManager {
@@ -205,13 +206,34 @@ impl DriverManager {
             processes.iter().map(|p| (p.driver_type.clone(), p.port)).collect::<Vec<_>>()
         };
 
-        for (driver_type, port) in processes {
-            if self.is_service_running(port).await {
+        for (driver_type, port) in &processes {
+            if self.is_service_running(*port).await {
                 let endpoint = format!("http://localhost:{port}");
                 healthy_endpoints_updated.insert(driver_type.clone(), endpoint);
                 debug!("Health check passed for {} on port {}", driver_type.browser_name(), port);
             } else {
                 warn!("Health check failed for {} on port {}", driver_type.browser_name(), port);
+            }
+        }
+
+        // CRITICAL FIX: Also check for externally running drivers on standard ports
+        // This handles drivers started outside of our process management
+        let standard_drivers = [
+            (DriverType::Chrome, 9515),
+            (DriverType::Firefox, 4444),
+            (DriverType::Edge, 9515), // Edge uses same port as Chrome but different process
+        ];
+
+        for (driver_type, port) in standard_drivers {
+            // Skip if we already checked this as a managed process
+            if processes.iter().any(|(existing_type, existing_port)| existing_type == &driver_type && existing_port == &port) {
+                continue;
+            }
+
+            if self.is_service_running(port).await {
+                let endpoint = format!("http://localhost:{port}");
+                healthy_endpoints_updated.insert(driver_type.clone(), endpoint);
+                debug!("External {} driver detected and registered on port {}", driver_type.browser_name(), port);
             }
         }
 
@@ -466,6 +488,7 @@ impl DriverManager {
                 process,
                 pid,
                 port,
+                browser_pids: Vec::new(),
             });
         }
 
@@ -577,6 +600,13 @@ impl DriverManager {
 
         // Check if already running on this port
         if self.is_service_running(port).await {
+            // CRITICAL FIX: If driver is already running, ensure it's registered in health endpoints
+            // This handles the case where drivers were started externally or in previous runs
+            if let Err(e) = self.refresh_driver_health().await {
+                warn!("Failed to refresh driver health for existing {}: {}", driver_type.browser_name(), e);
+            } else {
+                debug!("Successfully registered existing {} driver in health endpoints", driver_type.browser_name());
+            }
             return Ok(endpoint);
         }
 
@@ -590,6 +620,14 @@ impl DriverManager {
         // Wait for service to be ready
         self.wait_for_service_ready(&endpoint, Duration::from_secs(10))
             .await?;
+
+        // CRITICAL FIX: Refresh health endpoints after starting driver manually
+        // This ensures the driver is registered in healthy_endpoints for recipe execution
+        if let Err(e) = self.refresh_driver_health().await {
+            warn!("Failed to refresh driver health after starting {}: {}", driver_type.browser_name(), e);
+        } else {
+            debug!("Successfully refreshed driver health after starting {}", driver_type.browser_name());
+        }
 
         Ok(endpoint)
     }
@@ -793,6 +831,121 @@ impl DriverManager {
 
         // Wait a moment for processes to die
         sleep(Duration::from_millis(500)).await;
+        Ok(())
+    }
+
+    /// Force cleanup of all managed processes and their associated browser processes
+    pub async fn force_cleanup_all_processes(&self) -> Result<()> {
+        tracing::info!("🧹 Force cleaning all managed WebDriver and browser processes...");
+        
+        // First, collect process information without holding the mutex during async operations
+        let processes_to_kill = {
+            let mut processes = self.running_processes.lock().unwrap();
+            let mut to_kill = Vec::new();
+            
+            for managed_process in processes.iter() {
+                to_kill.push((
+                    managed_process.driver_type.clone(),
+                    managed_process.pid,
+                    managed_process.browser_pids.clone(),
+                ));
+            }
+            
+            processes.clear();
+            to_kill
+        };
+        
+        // Now kill processes without holding the mutex
+        for (driver_type, webdriver_pid, browser_pids) in processes_to_kill {
+            tracing::debug!("Killing managed {} process (PID: {})", 
+                driver_type.browser_name(), webdriver_pid);
+            
+            // Kill the WebDriver process using system kill command
+            match tokio::process::Command::new("kill")
+                .arg("-9")
+                .arg(webdriver_pid.to_string())
+                .output()
+                .await
+            {
+                Ok(_) => tracing::debug!("Successfully killed WebDriver process {}", webdriver_pid),
+                Err(e) => tracing::warn!("Failed to kill WebDriver process {}: {}", webdriver_pid, e),
+            }
+            
+            // Kill any tracked browser processes
+            for browser_pid in &browser_pids {
+                match tokio::process::Command::new("kill")
+                    .arg("-9")
+                    .arg(browser_pid.to_string())
+                    .output()
+                    .await
+                {
+                    Ok(_) => tracing::debug!("Killed tracked browser process {}", browser_pid),
+                    Err(e) => tracing::warn!("Failed to kill tracked browser process {}: {}", browser_pid, e),
+                }
+            }
+        }
+        
+        // Clear healthy endpoints since all processes are dead
+        {
+            let mut endpoints = self.healthy_endpoints.lock().unwrap();
+            endpoints.clear();
+        }
+        
+        // Perform comprehensive cleanup of any remaining orphaned processes
+        self.kill_all_orphaned_browser_processes().await?;
+        
+        Ok(())
+    }
+    
+    /// Kill all orphaned browser processes that might be consuming resources
+    async fn kill_all_orphaned_browser_processes(&self) -> Result<()> {
+        tracing::debug!("🧹 Killing all orphaned browser processes...");
+        
+        // Kill all browser processes with WebDriver-related patterns
+        let cleanup_commands = [
+            // Driver processes first
+            "pkill -f chromedriver",
+            "pkill -f geckodriver", 
+            "pkill -f msedgedriver",
+            // Browser processes
+            "pkill -f 'firefox.*headless'",
+            "pkill -f 'firefox.*marionette'",
+            "pkill -f 'chrome.*headless'",
+            "pkill -f 'chrome.*webdriver'",
+            "pkill -f 'chromium.*headless'",
+            "pkill -f 'chromium.*webdriver'",
+            // Chrome helper processes
+            "pkill -f chrome_crashpad_handler",
+            "pkill -f 'chrome.*zygote'",
+            "pkill -f 'chrome.*utility'",
+            "pkill -f 'chrome.*gpu-process'",
+            "pkill -f 'chrome.*renderer'",
+        ];
+        
+        for command in cleanup_commands {
+            match tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .output()
+                .await
+            {
+                Ok(_) => {}, // Don't log success/failure for each command to reduce noise
+                Err(e) => tracing::warn!("Cleanup command failed: {}: {}", command, e),
+            }
+        }
+        
+        // Final aggressive cleanup
+        let aggressive_command = "ps aux | grep -E '(chrome|firefox|chromium)' | grep -E '(headless|webdriver|marionette)' | grep -v grep | awk '{print $2}' | xargs -r kill -9";
+        match tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(aggressive_command)
+            .output()
+            .await
+        {
+            Ok(_) => tracing::debug!("Completed aggressive browser process cleanup"),
+            Err(e) => tracing::warn!("Aggressive cleanup failed: {}", e),
+        }
+        
         Ok(())
     }
 }

@@ -57,9 +57,6 @@ path = "examples/stdio_client.rs"
 name = "http_client"
 path = "examples/http_client.rs"
 
-[[example]]
-name = "oauth_demo_server"
-path = "examples/oauth_demo_server.rs"
 
 [[example]]
 name = "oauth_client"
