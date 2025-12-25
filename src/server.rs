@@ -112,13 +112,13 @@ impl WebDriverServer {
         _arguments: &Option<Map<String, Value>>,
     ) -> Result<CallToolResult, McpError> {
         let driver_manager = self.client_manager.get_driver_manager();
-        let healthy_endpoints = driver_manager.get_healthy_endpoints();
-        
+        let healthy_endpoints = driver_manager.get_healthy_endpoints().await;
+
         let mut result = serde_json::Map::new();
         for (driver_type, endpoint) in healthy_endpoints {
             result.insert(driver_type.browser_name().to_lowercase(), Value::String(endpoint));
         }
-        
+
         Ok(success_response(format!(
             "Healthy endpoints:\n{}",
             serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
@@ -130,10 +130,10 @@ impl WebDriverServer {
         _arguments: &Option<Map<String, Value>>,
     ) -> Result<CallToolResult, McpError> {
         let driver_manager = self.client_manager.get_driver_manager();
-        
+
         match driver_manager.refresh_driver_health().await {
             Ok(_) => {
-                let healthy_endpoints = driver_manager.get_healthy_endpoints();
+                let healthy_endpoints = driver_manager.get_healthy_endpoints().await;
                 Ok(success_response(format!(
                     "Health check completed. {} healthy endpoints found",
                     healthy_endpoints.len()
@@ -148,14 +148,15 @@ impl WebDriverServer {
         _arguments: &Option<Map<String, Value>>,
     ) -> Result<CallToolResult, McpError> {
         let driver_manager = self.client_manager.get_driver_manager();
-        let managed_processes = driver_manager.get_managed_processes_status();
-        
+        let managed_processes = driver_manager.get_managed_processes_status().await;
+
         if managed_processes.is_empty() {
             Ok(success_response("No managed WebDriver processes running".to_string()))
         } else {
+            use std::fmt::Write;
             let mut result = String::from("Managed WebDriver processes:\n");
             for (driver_type, pid, port) in managed_processes {
-                result.push_str(&format!("  {} - PID: {}, Port: {}\n", driver_type.browser_name(), pid, port));
+                let _ = writeln!(&mut result, "  {} - PID: {}, Port: {}", driver_type.browser_name(), pid, port);
             }
             Ok(success_response(result))
         }

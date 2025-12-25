@@ -198,7 +198,7 @@ impl ClientManager {
         // If endpoint is "auto", try to use pre-started drivers first
         if self.config.webdriver_endpoint == "auto" {
             // Check for healthy pre-started drivers
-            let healthy_endpoints = self.driver_manager.get_healthy_endpoints();
+            let healthy_endpoints = self.driver_manager.get_healthy_endpoints().await;
             tracing::debug!("Available healthy endpoints: {:?}", healthy_endpoints);
             
             if !healthy_endpoints.is_empty() {
@@ -541,8 +541,6 @@ impl ClientManager {
     }
 }
 
-impl Default for ClientManager {
-    fn default() -> Self {
-        Self::new(Config::from_env()).expect("Failed to create ClientManager with default config")
-    }
-}
+// Note: Default is intentionally not implemented for ClientManager
+// because ClientManager::new() can fail if configuration validation fails.
+// Use ClientManager::new(Config::from_env()) with proper error handling instead.

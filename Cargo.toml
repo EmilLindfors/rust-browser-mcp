@@ -36,6 +36,9 @@ clap = { version = "4.0", features = ["derive"] }
 axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
+# Lazy initialization
+once_cell = "1.19"
+
 # OAuth dependencies
 oauth2 = { version = "4.4" }
 openidconnect = { version = "3.5" }

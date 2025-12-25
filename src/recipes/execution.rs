@@ -129,7 +129,7 @@ impl<'a> RecipeExecutor<'a> {
         if let Err(e) = driver_manager.refresh_driver_health().await {
             tracing::warn!("Failed to refresh driver health: {}", e);
         } else {
-            let healthy_count = driver_manager.get_healthy_endpoints().len();
+            let healthy_count = driver_manager.get_healthy_endpoints().await.len();
             tracing::info!("✅ Health check completed: {} healthy endpoints found", healthy_count);
         }
         
@@ -784,41 +784,182 @@ impl<'a> RecipeExecutor<'a> {
         Ok("Login form submitted successfully".to_string())
     }
 
-    // Placeholder implementations for other tools
-    async fn execute_click(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Click executed (placeholder)".to_string())
+    async fn execute_click(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let selector = arguments.get("selector")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WebDriverError::Execution("Missing 'selector' parameter for click".to_string()))?;
+
+        let wait_timeout = arguments.get("wait_timeout")
+            .and_then(|v| v.as_f64());
+
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        let element = client_manager.find_element_with_wait(&client, selector, wait_timeout).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to find element '{}': {}", selector, e)))?;
+
+        element.click().await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to click element: {}", e)))?;
+
+        Ok(format!("Successfully clicked element '{}'", selector))
     }
 
-    async fn execute_send_keys(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Send keys executed (placeholder)".to_string())
+    async fn execute_send_keys(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let selector = arguments.get("selector")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WebDriverError::Execution("Missing 'selector' parameter for send_keys".to_string()))?;
+
+        let text = arguments.get("text")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WebDriverError::Execution("Missing 'text' parameter for send_keys".to_string()))?;
+
+        let wait_timeout = arguments.get("wait_timeout")
+            .and_then(|v| v.as_f64());
+
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        let element = client_manager.find_element_with_wait(&client, selector, wait_timeout).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to find element '{}': {}", selector, e)))?;
+
+        element.send_keys(text).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to send keys: {}", e)))?;
+
+        Ok(format!("Successfully sent keys to element '{}'", selector))
     }
 
-    async fn execute_get_title(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Get title executed (placeholder)".to_string())
+    async fn execute_get_title(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        let title = client.title().await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get title: {}", e)))?;
+
+        Ok(format!("Page title: {}", title))
     }
 
-    async fn execute_get_text(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Get text executed (placeholder)".to_string())
+    async fn execute_get_text(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let selector = arguments.get("selector")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WebDriverError::Execution("Missing 'selector' parameter for get_text".to_string()))?;
+
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        let element = client.find(fantoccini::Locator::Css(selector)).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to find element '{}': {}", selector, e)))?;
+
+        let text = element.text().await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get text: {}", e)))?;
+
+        Ok(format!("Element text: {}", text))
     }
 
-    async fn execute_wait_for_element(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Wait for element executed (placeholder)".to_string())
+    async fn execute_wait_for_element(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let selector = arguments.get("selector")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WebDriverError::Execution("Missing 'selector' parameter for wait_for_element".to_string()))?;
+
+        let timeout_seconds = arguments.get("timeout_seconds")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(10.0);
+
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        client_manager.find_element_with_wait(&client, selector, Some(timeout_seconds)).await
+            .map_err(|e| WebDriverError::Execution(format!("Element '{}' not found within {}s: {}", selector, timeout_seconds, e)))?;
+
+        Ok(format!("Element '{}' found within {}s", selector, timeout_seconds))
     }
 
-    async fn execute_back(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Back executed (placeholder)".to_string())
+    async fn execute_back(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        client.back().await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to navigate back: {}", e)))?;
+
+        Ok("Successfully navigated back".to_string())
     }
 
-    async fn execute_forward(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Forward executed (placeholder)".to_string())
+    async fn execute_forward(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        client.forward().await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to navigate forward: {}", e)))?;
+
+        Ok("Successfully navigated forward".to_string())
     }
 
-    async fn execute_refresh(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Refresh executed (placeholder)".to_string())
+    async fn execute_refresh(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        client.refresh().await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to refresh page: {}", e)))?;
+
+        Ok("Successfully refreshed page".to_string())
     }
 
-    async fn execute_script(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Execute script executed (placeholder)".to_string())
+    async fn execute_script(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let script = arguments.get("script")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WebDriverError::Execution("Missing 'script' parameter for execute_script".to_string()))?;
+
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        let result = client.execute(script, vec![]).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to execute script: {}", e)))?;
+
+        Ok(format!("Script result: {:?}", result))
     }
 
     async fn execute_resize_window(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
@@ -865,31 +1006,220 @@ impl<'a> RecipeExecutor<'a> {
         }
     }
 
-    async fn execute_get_current_url(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Get current URL executed (placeholder)".to_string())
+    async fn execute_get_current_url(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        let url = client.current_url().await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get current URL: {}", e)))?;
+
+        Ok(format!("Current URL: {}", url))
     }
 
-    async fn execute_find_element(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Find element executed (placeholder)".to_string())
+    async fn execute_find_element(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let selector = arguments.get("selector")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WebDriverError::Execution("Missing 'selector' parameter for find_element".to_string()))?;
+
+        let wait_timeout = arguments.get("wait_timeout")
+            .and_then(|v| v.as_f64());
+
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        let element = client_manager.find_element_with_wait(&client, selector, wait_timeout).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to find element '{}': {}", selector, e)))?;
+
+        // Get element info for confirmation
+        let tag_name = element.tag_name().await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get tag name: {}", e)))?;
+
+        Ok(format!("Found element '{}' (tag: {})", selector, tag_name))
     }
 
-    async fn execute_hover(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Hover executed (placeholder)".to_string())
+    async fn execute_hover(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let selector = arguments.get("selector")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WebDriverError::Execution("Missing 'selector' parameter for hover".to_string()))?;
+
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        // Use JavaScript to trigger hover since WebDriver Actions API may not be directly available
+        let hover_script = format!(
+            r#"
+            const element = document.querySelector('{}');
+            if (element) {{
+                const event = new MouseEvent('mouseover', {{
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                }});
+                element.dispatchEvent(event);
+                return true;
+            }}
+            return false;
+            "#,
+            selector.replace('\'', "\\'")
+        );
+
+        let result = client.execute(&hover_script, vec![]).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to hover: {}", e)))?;
+
+        if result.as_bool() == Some(true) {
+            Ok(format!("Successfully hovered over element '{}'", selector))
+        } else {
+            Err(WebDriverError::Execution(format!("Element '{}' not found for hover", selector)))
+        }
     }
 
-    async fn execute_scroll_to_element(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Scroll to element executed (placeholder)".to_string())
+    async fn execute_scroll_to_element(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let selector = arguments.get("selector")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WebDriverError::Execution("Missing 'selector' parameter for scroll_to_element".to_string()))?;
+
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        let scroll_script = format!(
+            r#"
+            const element = document.querySelector('{}');
+            if (element) {{
+                element.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                return true;
+            }}
+            return false;
+            "#,
+            selector.replace('\'', "\\'")
+        );
+
+        let result = client.execute(&scroll_script, vec![]).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to scroll: {}", e)))?;
+
+        if result.as_bool() == Some(true) {
+            Ok(format!("Successfully scrolled to element '{}'", selector))
+        } else {
+            Err(WebDriverError::Execution(format!("Element '{}' not found for scroll", selector)))
+        }
     }
 
-    async fn execute_get_attribute(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Get attribute executed (placeholder)".to_string())
+    async fn execute_get_attribute(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let selector = arguments.get("selector")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WebDriverError::Execution("Missing 'selector' parameter for get_attribute".to_string()))?;
+
+        let attribute = arguments.get("attribute")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WebDriverError::Execution("Missing 'attribute' parameter for get_attribute".to_string()))?;
+
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        let element = client.find(fantoccini::Locator::Css(selector)).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to find element '{}': {}", selector, e)))?;
+
+        let value = element.attr(attribute).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get attribute: {}", e)))?;
+
+        match value {
+            Some(v) => Ok(format!("Attribute '{}' value: {}", attribute, v)),
+            None => Ok(format!("Attribute '{}' not found on element", attribute)),
+        }
     }
 
-    async fn execute_get_property(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Get property executed (placeholder)".to_string())
+    async fn execute_get_property(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let selector = arguments.get("selector")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WebDriverError::Execution("Missing 'selector' parameter for get_property".to_string()))?;
+
+        let property = arguments.get("property")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WebDriverError::Execution("Missing 'property' parameter for get_property".to_string()))?;
+
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        let element = client.find(fantoccini::Locator::Css(selector)).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to find element '{}': {}", selector, e)))?;
+
+        let value = element.prop(property).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get property: {}", e)))?;
+
+        match value {
+            Some(v) => Ok(format!("Property '{}' value: {}", property, v)),
+            None => Ok(format!("Property '{}' not found on element", property)),
+        }
     }
 
-    async fn execute_fill_and_submit_form(&self, _arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
-        Ok("Fill and submit form executed (placeholder)".to_string())
+    async fn execute_fill_and_submit_form(&self, arguments: &serde_json::Map<String, Value>) -> Result<String, WebDriverError> {
+        let fields = arguments.get("fields")
+            .ok_or_else(|| WebDriverError::Execution("Missing 'fields' parameter for fill_and_submit_form".to_string()))?;
+
+        let submit_selector = arguments.get("submit_selector")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WebDriverError::Execution("Missing 'submit_selector' parameter".to_string()))?;
+
+        let session_id = arguments.get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let client_manager = self.server.get_client_manager();
+        let (_session, client) = client_manager.get_or_create_client(Some(session_id.to_string())).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to get client: {}", e)))?;
+
+        // Fill each field
+        if let Some(fields_obj) = fields.as_object() {
+            for (selector, value) in fields_obj {
+                if let Some(text) = value.as_str() {
+                    let element = client.find(fantoccini::Locator::Css(selector)).await
+                        .map_err(|e| WebDriverError::Execution(format!("Failed to find field '{}': {}", selector, e)))?;
+
+                    element.clear().await
+                        .map_err(|e| WebDriverError::Execution(format!("Failed to clear field '{}': {}", selector, e)))?;
+
+                    element.send_keys(text).await
+                        .map_err(|e| WebDriverError::Execution(format!("Failed to fill field '{}': {}", selector, e)))?;
+                }
+            }
+        }
+
+        // Click submit button
+        let submit_btn = client.find(fantoccini::Locator::Css(submit_selector)).await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to find submit button '{}': {}", submit_selector, e)))?;
+
+        submit_btn.click().await
+            .map_err(|e| WebDriverError::Execution(format!("Failed to click submit: {}", e)))?;
+
+        Ok("Form filled and submitted successfully".to_string())
     }
 }

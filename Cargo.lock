@@ -2448,7 +2448,7 @@ dependencies = [
 
 [[package]]
 name = "rust-browser-mcp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "askama",
@@ -2459,6 +2459,7 @@ dependencies = [
  "fantoccini",
  "futures",
  "oauth2 4.4.2",
+ "once_cell",
  "openidconnect",
  "reqwest 0.11.27",
  "rmcp",
