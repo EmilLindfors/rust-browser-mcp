@@ -17,7 +17,7 @@ async fn test_http_mode_driver_lifecycle() -> Result<()> {
     // Verify no drivers are running initially
     {
         let driver_manager = server.get_client_manager().get_driver_manager();
-        let initial_processes = driver_manager.get_managed_processes_status();
+        let initial_processes = driver_manager.get_managed_processes_status().await;
         assert!(initial_processes.is_empty(), "No drivers should be running initially");
     }
     
@@ -29,8 +29,8 @@ async fn test_http_mode_driver_lifecycle() -> Result<()> {
             
             // Verify drivers are now running
             let driver_manager = server.get_client_manager().get_driver_manager();
-            let running_processes = driver_manager.get_managed_processes_status();
-            let healthy_endpoints = driver_manager.get_healthy_endpoints();
+            let running_processes = driver_manager.get_managed_processes_status().await;
+            let healthy_endpoints = driver_manager.get_healthy_endpoints().await;
             
             if !running_processes.is_empty() {
                 println!("✅ HTTP mode: Drivers auto-started successfully ({} processes, {} healthy)", 
@@ -63,11 +63,11 @@ async fn test_stdio_mode_reactive_lifecycle() -> Result<()> {
     
     // Verify no drivers auto-start in STDIO mode
     let driver_manager = server.get_client_manager().get_driver_manager();
-    let initial_processes = driver_manager.get_managed_processes_status();
+    let initial_processes = driver_manager.get_managed_processes_status().await;
     assert!(initial_processes.is_empty(), "STDIO mode should not auto-start drivers");
-    
+
     // Verify healthy endpoints are empty
-    let initial_healthy = driver_manager.get_healthy_endpoints();
+    let initial_healthy = driver_manager.get_healthy_endpoints().await;
     assert!(initial_healthy.is_empty(), "Should have no healthy endpoints initially in STDIO mode");
     
     // Simulate client manually starting a driver (what the start_driver tool would do)
@@ -77,7 +77,7 @@ async fn test_stdio_mode_reactive_lifecycle() -> Result<()> {
             println!("✅ STDIO mode: Successfully started driver manually at {}", endpoint);
             
             // Verify driver is now managed
-            let managed_processes = driver_manager.get_managed_processes_status();
+            let managed_processes = driver_manager.get_managed_processes_status().await;
             if !managed_processes.is_empty() {
                 println!("✅ STDIO mode: Driver is properly managed after manual start");
                 // Cleanup

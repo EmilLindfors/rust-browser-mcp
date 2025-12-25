@@ -47,7 +47,7 @@ async fn test_health_check_functionality() -> Result<()> {
     
     // Test health check
     driver_manager.refresh_driver_health().await?;
-    let healthy_endpoints = driver_manager.get_healthy_endpoints();
+    let healthy_endpoints = driver_manager.get_healthy_endpoints().await;
     
     // Should have at least one healthy driver
     assert!(!healthy_endpoints.is_empty(), "Should have healthy drivers after startup");
@@ -133,7 +133,7 @@ async fn test_driver_status_reporting() -> Result<()> {
     let driver_manager = DriverManager::new();
     
     // Initially no processes
-    let initial_status = driver_manager.get_managed_processes_status();
+    let initial_status = driver_manager.get_managed_processes_status().await;
     assert!(initial_status.is_empty(), "Should start with no managed processes");
 
     // Start drivers
@@ -142,14 +142,14 @@ async fn test_driver_status_reporting() -> Result<()> {
     driver_manager.start_concurrent_drivers(&drivers, timeout).await?;
 
     // Should have managed processes now
-    let status_after_start = driver_manager.get_managed_processes_status();
+    let status_after_start = driver_manager.get_managed_processes_status().await;
     assert!(!status_after_start.is_empty(), "Should have managed processes after startup");
 
     // Cleanup
     driver_manager.stop_all_drivers().await?;
 
     // Should be empty again after cleanup
-    let final_status = driver_manager.get_managed_processes_status();
+    let final_status = driver_manager.get_managed_processes_status().await;
     assert!(final_status.is_empty(), "Should have no managed processes after cleanup");
     
     Ok(())

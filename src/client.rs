@@ -3,13 +3,23 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use fantoccini::{Client, ClientBuilder, Locator, elements::Element};
 use futures::lock::Mutex;
 
-use crate::{config::Config, driver::DriverManager, error::Result};
+use crate::{config::Config, driver::DriverManager, error::Result, pool::ConnectionPool};
+
+/// Metadata about a session for pool management
+#[derive(Clone, Debug)]
+struct SessionMetadata {
+    driver_type: crate::driver::DriverType,
+}
 
 #[derive(Clone)]
 pub struct ClientManager {
     clients: Arc<Mutex<HashMap<String, Client>>>,
+    /// Metadata for each session (driver type, etc.)
+    session_metadata: Arc<Mutex<HashMap<String, SessionMetadata>>>,
     config: Config,
     driver_manager: DriverManager,
+    /// Connection pool for reusing sessions
+    pool: Arc<ConnectionPool>,
 }
 
 impl ClientManager {
@@ -18,10 +28,14 @@ impl ClientManager {
             .validate()
             .map_err(|e| anyhow::anyhow!("Configuration error: {}", e))?;
 
+        let pool = Arc::new(ConnectionPool::new(&config));
+
         Ok(Self {
             clients: Arc::new(Mutex::new(HashMap::new())),
+            session_metadata: Arc::new(Mutex::new(HashMap::new())),
             config,
             driver_manager: DriverManager::new(),
+            pool,
         })
     }
 
@@ -68,22 +82,56 @@ impl ClientManager {
 
     /// Full multi-tenant client creation for HTTP mode
     async fn get_or_create_client_http(&self, session_id: Option<String>) -> Result<(String, Client)> {
-        let mut clients = self.clients.lock().await;
         let session = session_id.unwrap_or_else(|| "default".to_string());
 
-        if let Some(client) = clients.get(&session) {
-            match client.current_url().await {
-                Ok(_) => return Ok((session, client.clone())),
-                Err(_) => {
-                    clients.remove(&session);
+        // Check active clients first
+        {
+            let mut clients = self.clients.lock().await;
+            if let Some(client) = clients.get(&session) {
+                match client.current_url().await {
+                    Ok(_) => return Ok((session, client.clone())),
+                    Err(_) => {
+                        clients.remove(&session);
+                        // Also remove from metadata
+                        let mut metadata = self.session_metadata.lock().await;
+                        metadata.remove(&session);
+                    }
                 }
             }
         }
 
-        // Determine the actual endpoint to use based on session preferences
+        // Determine driver type for this session
+        let driver_type = self.extract_browser_preference_from_session(&session)
+            .unwrap_or(crate::driver::DriverType::Chrome);
+
+        // Try to acquire from pool
+        if let Ok(Some((pooled_session, client))) = self.pool.acquire(&driver_type).await {
+            tracing::debug!(
+                "Reusing pooled {} connection for session '{}'",
+                driver_type.browser_name(),
+                session
+            );
+
+            // Store in active clients
+            let mut clients = self.clients.lock().await;
+            clients.insert(session.clone(), client.clone());
+
+            // Store metadata
+            let mut metadata = self.session_metadata.lock().await;
+            metadata.insert(session.clone(), SessionMetadata {
+                driver_type: driver_type.clone(),
+            });
+
+            // Update pool to track with new session id
+            self.pool.release(&driver_type, &pooled_session).await;
+            self.pool.add(driver_type, client.clone(), session.clone()).await;
+
+            return Ok((session, client));
+        }
+
+        // No pooled connection available, create a new one
         let endpoint = self.resolve_webdriver_endpoint_for_session(&session).await?;
 
-        // Create client with proper browser configuration
         let client = self
             .create_configured_client(&endpoint, &session)
             .await
@@ -96,7 +144,22 @@ impl ClientManager {
                 )
             })?;
 
+        // Add to pool
+        let added_to_pool = self.pool.add(driver_type.clone(), client.clone(), session.clone()).await;
+        if added_to_pool {
+            tracing::debug!("Added new {} connection to pool: {}", driver_type.browser_name(), session);
+        }
+
+        // Store in active clients
+        let mut clients = self.clients.lock().await;
         clients.insert(session.clone(), client.clone());
+
+        // Store metadata
+        let mut metadata = self.session_metadata.lock().await;
+        metadata.insert(session.clone(), SessionMetadata {
+            driver_type,
+        });
+
         Ok((session, client))
     }
 
@@ -345,14 +408,53 @@ impl ClientManager {
         &self.config
     }
 
+    /// Get access to the connection pool
+    pub fn get_pool(&self) -> &ConnectionPool {
+        &self.pool
+    }
+
+    /// Release a session back to the pool (marks it as idle for reuse)
+    pub async fn release_session(&self, session_id: &str) {
+        // Get the driver type for this session
+        let driver_type = {
+            let metadata = self.session_metadata.lock().await;
+            metadata.get(session_id).map(|m| m.driver_type.clone())
+        };
+
+        if let Some(driver_type) = driver_type {
+            self.pool.release(&driver_type, session_id).await;
+            tracing::debug!("Released session '{}' back to pool", session_id);
+        }
+    }
+
+    /// Get pool statistics
+    pub async fn get_pool_stats(&self) -> std::collections::HashMap<crate::driver::DriverType, crate::pool::PoolStats> {
+        self.pool.get_stats().await
+    }
+
     /// Close all active WebDriver sessions
     pub async fn close_all_sessions(&self) -> Result<()> {
         tracing::info!("Closing all active WebDriver sessions...");
+
+        // Close all pooled connections first
+        if self.pool.is_enabled() {
+            tracing::debug!("Closing pooled connections...");
+            if let Err(e) = self.pool.close_all().await {
+                tracing::warn!("Error closing pool connections: {}", e);
+            }
+        }
+
+        // Clear session metadata
+        {
+            let mut metadata = self.session_metadata.lock().await;
+            metadata.clear();
+        }
+
         let mut clients = self.clients.lock().await;
-        
+
         for (session_id, client) in clients.drain() {
             tracing::debug!("Closing session: {}", session_id);
-            
+
             // Add timeout to individual session close operations
             let close_timeout = Duration::from_secs(2);
             match tokio::time::timeout(close_timeout, client.close()).await {
@@ -364,13 +466,13 @@ impl ClientManager {
                 }
             }
         }
-        
+
         // CRITICAL FIX: Force cleanup of orphaned browser processes
         self.force_cleanup_orphaned_processes().await?;
-        
+
         // Also cleanup all managed processes through driver manager
         self.driver_manager.force_cleanup_all_processes().await?;
-        
+
         tracing::info!("All WebDriver sessions closed and orphaned processes cleaned");
         Ok(())
     }
