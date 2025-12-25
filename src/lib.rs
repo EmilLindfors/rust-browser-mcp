@@ -2,6 +2,8 @@ mod client;
 mod config;
 mod driver;
 mod error;
+mod handlers;
+mod pool;
 mod server;
 
 pub mod auth;

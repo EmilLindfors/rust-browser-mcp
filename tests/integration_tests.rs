@@ -302,13 +302,13 @@ async fn test_lifecycle_management() {
     let driver_type = DriverType::Firefox;
 
     // Test that no drivers are initially managed
-    let initial_status = driver_manager.get_managed_processes_status();
+    let initial_status = driver_manager.get_managed_processes_status().await;
     assert!(
         initial_status.is_empty(),
         "Should start with no managed processes"
     );
     assert!(
-        !driver_manager.is_driver_managed(&driver_type),
+        !driver_manager.is_driver_managed(&driver_type).await,
         "Firefox should not be initially managed"
     );
 
@@ -322,13 +322,13 @@ async fn test_lifecycle_management() {
             println!("✅ Successfully started driver at: {endpoint}");
 
             // Verify driver is now managed
-            let status_after_start = driver_manager.get_managed_processes_status();
+            let status_after_start = driver_manager.get_managed_processes_status().await;
             assert!(
                 !status_after_start.is_empty(),
                 "Should have managed processes after start"
             );
             assert!(
-                driver_manager.is_driver_managed(&driver_type),
+                driver_manager.is_driver_managed(&driver_type).await,
                 "Firefox should be managed after start"
             );
 
@@ -350,7 +350,7 @@ async fn test_lifecycle_management() {
             sleep(Duration::from_millis(500)).await;
 
             // Verify driver is no longer managed
-            let status_after_stop = driver_manager.get_managed_processes_status();
+            let status_after_stop = driver_manager.get_managed_processes_status().await;
             let firefox_processes: Vec<_> = status_after_stop
                 .iter()
                 .filter(|(dt, _, _)| dt == &driver_type)
@@ -376,7 +376,7 @@ async fn test_lifecycle_management() {
     );
 
     // Final verification - no processes should be managed
-    let final_status = driver_manager.get_managed_processes_status();
+    let final_status = driver_manager.get_managed_processes_status().await;
     assert!(
         final_status.is_empty(),
         "Should end with no managed processes"
